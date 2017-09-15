@@ -139,6 +139,10 @@ impl Package {
             {}\
         ", toml)
     }
+
+    pub fn is_local(&self) -> bool {
+        self.manifest.summary().source_id().is_path()
+    }
 }
 
 impl fmt::Display for Package {

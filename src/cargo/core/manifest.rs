@@ -36,6 +36,7 @@ pub struct Manifest {
     original: Rc<TomlManifest>,
     features: Features,
     im_a_teapot: Option<bool>,
+    always_optimize_deps: Option<bool>,
 }
 
 /// When parsing `Cargo.toml`, some warnings should silenced
@@ -190,6 +191,7 @@ pub struct Profiles {
     pub custom_build: Profile,
     pub check: Profile,
     pub doctest: Profile,
+    pub deps_profile: Option<Profile>,
 }
 
 /// Information about a binary, a library, an example, etc. that is part of the
@@ -245,6 +247,7 @@ impl Manifest {
                workspace: WorkspaceConfig,
                features: Features,
                im_a_teapot: Option<bool>,
+               always_optimize_deps: Option<bool>,
                original: Rc<TomlManifest>) -> Manifest {
         Manifest {
             summary: summary,
@@ -262,6 +265,7 @@ impl Manifest {
             features: features,
             original: original,
             im_a_teapot: im_a_teapot,
+            always_optimize_deps,
         }
     }
 
@@ -282,6 +286,9 @@ impl Manifest {
     pub fn patch(&self) -> &HashMap<Url, Vec<Dependency>> { &self.patch }
     pub fn links(&self) -> Option<&str> {
         self.links.as_ref().map(|s| &s[..])
+    }
+    pub fn always_optimize_deps(&self) -> bool {
+        self.always_optimize_deps == Some(true)
     }
 
     pub fn workspace_config(&self) -> &WorkspaceConfig {
@@ -317,6 +324,12 @@ impl Manifest {
             self.features.require(Feature::test_dummy_unstable()).chain_err(|| {
                 "the `im-a-teapot` manifest key is unstable and may not work \
                  properly in England"
+            })?;
+        }
+        if self.always_optimize_deps.is_some() {
+            self.features.require(Feature::always_optimize_deps()).chain_err(|| {
+                "the `always-optimize-deps` manifest key is unstable and may not work \
+                 properly outside of Russia"
             })?;
         }
 

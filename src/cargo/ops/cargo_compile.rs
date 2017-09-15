@@ -113,7 +113,7 @@ pub enum Packages<'a> {
 
 impl<'a> Packages<'a> {
     pub fn from_flags(virtual_ws: bool, all: bool, exclude: &'a Vec<String>, package: &'a Vec<String>)
-        -> CargoResult<Self>
+                      -> CargoResult<Self>
     {
         let all = all || (virtual_ws && package.is_empty());
 
@@ -160,7 +160,7 @@ impl<'a> Packages<'a> {
 #[derive(Clone, Copy, Debug)]
 pub enum FilterRule<'a> {
     All,
-    Just (&'a [String]),
+    Just(&'a [String]),
 }
 
 #[derive(Debug)]
@@ -193,7 +193,7 @@ pub fn compile_with_exec<'a>(ws: &Workspace<'a>,
                 let err: CargoResult<_> = Err(CargoError::from(warning.message.to_owned()));
                 return err.chain_err(|| {
                     format!("failed to parse manifest at `{}`", member.manifest_path().display())
-                })
+                });
             } else {
                 options.config.shell().warn(&warning.message)?
             }
@@ -207,12 +207,14 @@ pub fn compile_ws<'a>(ws: &Workspace<'a>,
                       options: &CompileOptions<'a>,
                       exec: Arc<Executor>)
                       -> CargoResult<ops::Compilation<'a>> {
-    let CompileOptions { config, jobs, target, spec, features,
-                         all_features, no_default_features,
-                         release, mode, message_format,
-                         ref filter,
-                         ref target_rustdoc_args,
-                         ref target_rustc_args } = *options;
+    let CompileOptions {
+        config, jobs, target, spec, features,
+        all_features, no_default_features,
+        release, mode, message_format,
+        ref filter,
+        ref target_rustdoc_args,
+        ref target_rustc_args
+    } = *options;
 
     let target = target.map(|s| s.to_string());
 
@@ -361,7 +363,7 @@ impl<'a> FilterRule<'a> {
             FilterRule::All => true,
             FilterRule::Just(targets) => {
                 targets.iter().any(|x| *x == target.name())
-            },
+            }
         }
     }
 
@@ -394,15 +396,19 @@ impl<'a> CompileFilter<'a> {
 
         if all_targets {
             CompileFilter::Only {
-                lib: true, bins: FilterRule::All,
-                examples: FilterRule::All, benches: FilterRule::All,
+                lib: true,
+                bins: FilterRule::All,
+                examples: FilterRule::All,
+                benches: FilterRule::All,
                 tests: FilterRule::All,
             }
         } else if lib_only || rule_bins.is_specific() || rule_tsts.is_specific()
-                    || rule_exms.is_specific() || rule_bens.is_specific() {
+            || rule_exms.is_specific() || rule_bens.is_specific() {
             CompileFilter::Only {
-                lib: lib_only, bins: rule_bins,
-                examples: rule_exms, benches: rule_bens,
+                lib: lib_only,
+                bins: rule_bins,
+                examples: rule_exms,
+                benches: rule_bens,
                 tests: rule_tsts,
             }
         } else {
@@ -465,7 +471,7 @@ fn generate_auto_targets<'a>(mode: CompileMode, targets: &'a [Target],
             }).map(|t| {
                 BuildProposal {
                     target: t,
-                    profile: if t.is_example() {dep} else {profile},
+                    profile: if t.is_example() { dep } else { profile },
                     required: !required_features_filterable,
                 }
             }).collect::<Vec<_>>();
@@ -569,7 +575,7 @@ fn propose_indicated_targets<'a>(pkg: &'a Package,
 /// Collect the targets that are libraries or have all required features available.
 fn filter_compatible_targets<'a>(mut proposals: Vec<BuildProposal<'a>>,
                                  features: &HashSet<String>)
-        -> CargoResult<Vec<(&'a Target, &'a Profile)>> {
+                                 -> CargoResult<Vec<(&'a Target, &'a Profile)>> {
     let mut compatible = Vec::with_capacity(proposals.len());
     for proposal in proposals.drain(..) {
         let unavailable_features = match proposal.target.required_features() {
@@ -581,8 +587,8 @@ fn filter_compatible_targets<'a>(mut proposals: Vec<BuildProposal<'a>>,
         } else if proposal.required {
             let required_features = proposal.target.required_features().unwrap();
             let quoted_required_features: Vec<String> = required_features.iter()
-                                                                         .map(|s| format!("`{}`",s))
-                                                                         .collect();
+                .map(|s| format!("`{}`", s))
+                .collect();
             bail!("target `{}` requires the features: {}\n\
                   Consider enabling them by passing e.g. `--features=\"{}\"`",
                   proposal.target.name(),
@@ -602,8 +608,8 @@ fn generate_targets<'a>(pkg: &'a Package,
                         features: &HashSet<String>,
                         release: bool)
                         -> CargoResult<Vec<(&'a Target, &'a Profile)>> {
-    let build = if release {&profiles.release} else {&profiles.dev};
-    let test = if release {&profiles.bench} else {&profiles.test};
+    let build = if release { &profiles.release } else { &profiles.dev };
+    let test = if release { &profiles.bench } else { &profiles.test };
     let profile = match mode {
         CompileMode::Test => test,
         CompileMode::Bench => &profiles.bench,
@@ -702,7 +708,6 @@ fn scrape_build_config(config: &Config,
 
 fn scrape_target_config(config: &Config, triple: &str)
                         -> CargoResult<ops::TargetConfig> {
-
     let key = format!("target.{}", triple);
     let mut ret = ops::TargetConfig {
         ar: config.get_path(&format!("{}.ar", key))?.map(|v| v.val),
@@ -717,7 +722,7 @@ fn scrape_target_config(config: &Config, triple: &str)
         match lib_name.as_str() {
             "ar" | "linker" | "runner" | "rustflags" => {
                 continue
-            },
+            }
             _ => {}
         }
 
@@ -734,10 +739,10 @@ fn scrape_target_config(config: &Config, triple: &str)
         // We require deterministic order of evaluation, so we must sort the pairs by key first.
         let mut pairs = Vec::new();
         for (k, value) in value.table(&lib_name)?.0 {
-            pairs.push((k,value));
+            pairs.push((k, value));
         }
-        pairs.sort_by_key( |p| p.0 );
-        for (k,value) in pairs{
+        pairs.sort_by_key(|p| p.0);
+        for (k, value) in pairs {
             let key = format!("{}.{}", key, k);
             match &k[..] {
                 "rustc-flags" => {
@@ -746,14 +751,14 @@ fn scrape_target_config(config: &Config, triple: &str)
                                          definition.display());
                     let (paths, links) =
                         BuildOutput::parse_rustc_flags(&flags, &whence)
-                    ?;
+                            ?;
                     output.library_paths.extend(paths);
                     output.library_links.extend(links);
                 }
                 "rustc-link-lib" => {
                     let list = value.list(&k)?;
                     output.library_links.extend(list.iter()
-                                                    .map(|v| v.0.clone()));
+                        .map(|v| v.0.clone()));
                 }
                 "rustc-link-search" => {
                     let list = value.list(&k)?;

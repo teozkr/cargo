@@ -749,7 +749,7 @@ impl<'a, 'cfg> Context<'a, 'cfg> {
                         let unit = Unit {
                             pkg: pkg,
                             target: t,
-                            profile: self.lib_or_check_profile(unit, t),
+                            profile: self.lib_or_check_profile(unit, pkg, t),
                             kind: unit.kind.for_target(t),
                         };
                         Ok(unit)
@@ -791,7 +791,7 @@ impl<'a, 'cfg> Context<'a, 'cfg> {
                 Unit {
                     pkg: unit.pkg,
                     target: t,
-                    profile: self.lib_profile(),
+                    profile: self.lib_profile(unit.pkg),
                     kind: unit.kind.for_target(t),
                 }
             }));
@@ -833,7 +833,7 @@ impl<'a, 'cfg> Context<'a, 'cfg> {
             }
             self.dep_build_script(unit)
         }).chain(Some(Unit {
-            profile: self.build_script_profile(unit.pkg.package_id()),
+            profile: self.build_script_profile(unit.pkg),
             kind: Kind::Host, // build scripts always compiled for the host
             ..*unit
         })).collect())
@@ -868,7 +868,7 @@ impl<'a, 'cfg> Context<'a, 'cfg> {
             ret.push(Unit {
                 pkg: dep,
                 target: lib,
-                profile: self.lib_profile(),
+                profile: self.lib_profile(dep),
                 kind: unit.kind.for_target(lib),
             });
             if self.build_config.doc_all {
@@ -914,7 +914,7 @@ impl<'a, 'cfg> Context<'a, 'cfg> {
             Unit {
                 pkg: unit.pkg,
                 target: t,
-                profile: self.lib_or_check_profile(unit, t),
+                profile: self.lib_or_check_profile(unit, unit.pkg, t),
                 kind: unit.kind.for_target(t),
             }
         })
@@ -969,7 +969,17 @@ impl<'a, 'cfg> Context<'a, 'cfg> {
     /// Number of jobs specified for this build
     pub fn jobs(&self) -> u32 { self.build_config.jobs }
 
-    pub fn lib_profile(&self) -> &'a Profile {
+    pub fn lib_profile(&self, pkg: &Package) -> &'a Profile {
+        if !pkg.is_local() {
+            if let Some(ref profile) = self.profiles.deps_profile {
+                return profile;
+            }
+        }
+
+        self.lib_profile2()
+    }
+
+    pub fn lib_profile2(&self) -> &'a Profile {
         let (normal, test) = if self.build_config.release {
             (&self.profiles.release, &self.profiles.bench_deps)
         } else {
@@ -982,18 +992,18 @@ impl<'a, 'cfg> Context<'a, 'cfg> {
         }
     }
 
-    pub fn lib_or_check_profile(&self, unit: &Unit, target: &Target) -> &'a Profile {
+    pub fn lib_or_check_profile(&self, unit: &Unit, pkg: &Package, target: &Target) -> &'a Profile {
         if unit.profile.check && !target.is_custom_build() && !target.for_host() {
             &self.profiles.check
         } else {
-            self.lib_profile()
+            self.lib_profile(pkg)
         }
     }
 
-    pub fn build_script_profile(&self, _pkg: &PackageId) -> &'a Profile {
+    pub fn build_script_profile(&self, pkg: &Package) -> &'a Profile {
         // TODO: should build scripts always be built with the same library
         //       profile? How is this controlled at the CLI layer?
-        self.lib_profile()
+        self.lib_profile(pkg)
     }
 
     pub fn incremental_args(&self, unit: &Unit) -> CargoResult<Vec<String>> {

@@ -393,6 +393,8 @@ pub struct TomlProject {
     cargo_features: Option<Vec<String>>,
     #[serde(rename = "im-a-teapot")]
     im_a_teapot: Option<bool>,
+    #[serde(rename = "always-optimize-deps")]
+    always_optimize_deps: Option<bool>,
 
     // package metadata
     description: Option<String>,
@@ -646,7 +648,10 @@ impl TomlManifest {
                        `[workspace]`, only one can be specified")
             }
         };
-        let profiles = build_profiles(&me.profile);
+        let mut profiles = build_profiles(&me.profile);
+        if project.always_optimize_deps == Some(true) {
+            profiles.deps_profile = Some(profiles.release.clone());
+        }
         let publish = project.publish.unwrap_or(true);
         let empty = Vec::new();
         let cargo_features = project.cargo_features.as_ref().unwrap_or(&empty);
@@ -664,6 +669,7 @@ impl TomlManifest {
                                          workspace_config,
                                          features,
                                          project.im_a_teapot,
+                                         project.always_optimize_deps,
                                          me.clone());
         if project.license_file.is_some() && project.license.is_some() {
             manifest.add_warning("only one of `license` or \
@@ -1043,6 +1049,7 @@ fn build_profiles(profiles: &Option<TomlProfiles>) -> Profiles {
         check: merge(Profile::default_check(),
                      profiles.and_then(|p| p.dev.as_ref())),
         doctest: Profile::default_doctest(),
+        deps_profile: None,
     };
     // The test/bench targets cannot have panic=abort because they'll all get
     // compiled with --test which requires the unwind runtime currently

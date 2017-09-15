@@ -55,6 +55,7 @@ pub fn clean(ws: &Workspace, opts: &CleanOptions) -> CargoResult<()> {
                     ref release, ref dev, ref test, ref bench, ref doc,
                     ref custom_build, ref test_deps, ref bench_deps, ref check,
                     ref doctest,
+                    deps_profile: _
                 } = *profiles;
                 let profiles = [release, dev, test, bench, doc, custom_build,
                                 test_deps, bench_deps, check, doctest];

@@ -122,6 +122,8 @@ features! {
         // A dummy feature that gates the usage of the `im-a-teapot` manifest
         // entry. This is basically just intended for tests.
         [unstable] test_dummy_unstable: bool,
+
+        [unstable] always_optimize_deps: bool,
     }
 }
 

@@ -3,8 +3,9 @@ extern crate hamcrest;
 
 use std::env;
 
-use cargotest::is_nightly;
+use cargotest::{is_nightly, ChannelChanger};
 use cargotest::support::{project, execs};
+use cargotest::support::registry::Package;
 use hamcrest::assert_that;
 
 #[test]
@@ -282,4 +283,33 @@ fn profile_in_virtual_manifest_works() {
 [COMPILING] bar v0.1.0 ([..])
 [RUNNING] `rustc [..]`
 [FINISHED] dev [optimized] target(s) in [..]"));
+}
+
+
+#[test]
+fn dependencies_profile_in_dev() {
+    let p = project("foo")
+        .file("Cargo.toml", r#"
+            [package]
+            name = "test"
+            version = "0.0.0"
+            authors = []
+            cargo-features = ["always-optimize-deps"]
+            always-optimize-deps = true
+
+            [profile.release]
+            opt-level = 3
+
+            [dependencies]
+            baz = "*"
+        "#)
+        .file("src/lib.rs", "");
+    Package::new("baz", "0.0.1").publish();
+
+    assert_that(p.cargo_process("build").arg("-v")
+                    .masquerade_as_nightly_cargo(),
+        execs().with_status(0).with_stderr_contains("\
+[RUNNING] `rustc --crate-name baz [..]lib.rs [..] -C opt-level=3 [..]`
+"
+        ));
 }

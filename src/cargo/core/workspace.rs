@@ -206,6 +206,14 @@ impl<'cfg> Workspace<'cfg> {
         }
     }
 
+    pub fn always_optimize_deps(&self) -> bool {
+        let root = self.root_manifest.as_ref().unwrap_or(&self.current_manifest);
+        match *self.packages.get(root) {
+            MaybePackage::Package(ref p) => p.manifest().always_optimize_deps(),
+            MaybePackage::Virtual(_) => false, //TODO: need workspace-wide nightly features.
+        }
+    }
+
     /// Returns the root path of this workspace.
     ///
     /// That is, this returns the path of the directory containing the
@@ -555,6 +563,7 @@ impl<'cfg> Workspace<'cfg> {
                 custom_build: Profile::default_custom_build(),
                 check: Profile::default_check(),
                 doctest: Profile::default_doctest(),
+                deps_profile: None,
             };
 
             for pkg in self.members().filter(|p| p.manifest_path() != root_manifest) {
