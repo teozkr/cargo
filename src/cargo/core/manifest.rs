@@ -18,6 +18,16 @@ pub enum EitherManifest {
     Virtual(VirtualManifest),
 }
 
+#[derive(Clone, Debug)]
+struct CommonManifest {
+    workspace: WorkspaceConfig,
+    replace: Vec<(PackageIdSpec, Dependency)>,
+    patch: HashMap<Url, Vec<Dependency>>,
+    profiles: Profiles,
+    features: Features,
+    im_a_teapot: Option<bool>,
+}
+
 /// Contains all the information about a package, as loaded from a Cargo.toml.
 #[derive(Clone, Debug)]
 pub struct Manifest {
@@ -28,14 +38,14 @@ pub struct Manifest {
     exclude: Vec<String>,
     include: Vec<String>,
     metadata: ManifestMetadata,
-    profiles: Profiles,
     publish: bool,
-    replace: Vec<(PackageIdSpec, Dependency)>,
-    patch: HashMap<Url, Vec<Dependency>>,
-    workspace: WorkspaceConfig,
     original: Rc<TomlManifest>,
-    features: Features,
-    im_a_teapot: Option<bool>,
+    common: CommonManifest,
+}
+
+#[derive(Clone, Debug)]
+pub struct VirtualManifest {
+    common: CommonManifest,
 }
 
 /// When parsing `Cargo.toml`, some warnings should silenced
@@ -45,14 +55,6 @@ pub struct Manifest {
 pub struct DelayedWarning {
     pub message: String,
     pub is_critical: bool
-}
-
-#[derive(Clone, Debug)]
-pub struct VirtualManifest {
-    replace: Vec<(PackageIdSpec, Dependency)>,
-    patch: HashMap<Url, Vec<Dependency>>,
-    workspace: WorkspaceConfig,
-    profiles: Profiles,
 }
 
 /// General metadata about a package which is just blindly uploaded to the
@@ -231,6 +233,26 @@ impl ser::Serialize for Target {
     }
 }
 
+impl CommonManifest {
+    fn feature_gate(&self) -> CargoResult<()> {
+        if self.im_a_teapot.is_some() {
+            self.features.require(Feature::test_dummy_unstable()).chain_err(|| {
+                "the `im-a-teapot` manifest key is unstable and may not work \
+                 properly in England"
+            })?;
+        }
+        Ok(())
+    }
+
+    fn print_teapot(&self, config: &Config) {
+        if let Some(teapot) = self.im_a_teapot {
+            if config.cli_unstable().print_im_a_teapot {
+                println!("im-a-teapot = {}", teapot);
+            }
+        }
+    }
+}
+
 impl Manifest {
     pub fn new(summary: Summary,
                targets: Vec<Target>,
@@ -254,14 +276,9 @@ impl Manifest {
             include: include,
             links: links,
             metadata: metadata,
-            profiles: profiles,
             publish: publish,
-            replace: replace,
-            patch: patch,
-            workspace: workspace,
-            features: features,
             original: original,
-            im_a_teapot: im_a_teapot,
+            common: CommonManifest { workspace, profiles, replace, patch, features, im_a_teapot }
         }
     }
 
@@ -275,21 +292,21 @@ impl Manifest {
     pub fn targets(&self) -> &[Target] { &self.targets }
     pub fn version(&self) -> &Version { self.package_id().version() }
     pub fn warnings(&self) -> &[DelayedWarning] { &self.warnings }
-    pub fn profiles(&self) -> &Profiles { &self.profiles }
+    pub fn profiles(&self) -> &Profiles { &self.common.profiles }
     pub fn publish(&self) -> bool { self.publish }
-    pub fn replace(&self) -> &[(PackageIdSpec, Dependency)] { &self.replace }
+    pub fn replace(&self) -> &[(PackageIdSpec, Dependency)] { &self.common.replace }
     pub fn original(&self) -> &TomlManifest { &self.original }
-    pub fn patch(&self) -> &HashMap<Url, Vec<Dependency>> { &self.patch }
+    pub fn patch(&self) -> &HashMap<Url, Vec<Dependency>> { &self.common.patch }
     pub fn links(&self) -> Option<&str> {
         self.links.as_ref().map(|s| &s[..])
     }
 
     pub fn workspace_config(&self) -> &WorkspaceConfig {
-        &self.workspace
+        &self.common.workspace
     }
 
     pub fn features(&self) -> &Features {
-        &self.features
+        &self.common.features
     }
 
     pub fn add_warning(&mut self, s: String) {
@@ -313,23 +330,12 @@ impl Manifest {
     }
 
     pub fn feature_gate(&self) -> CargoResult<()> {
-        if self.im_a_teapot.is_some() {
-            self.features.require(Feature::test_dummy_unstable()).chain_err(|| {
-                "the `im-a-teapot` manifest key is unstable and may not work \
-                 properly in England"
-            })?;
-        }
-
-        Ok(())
+        self.common.feature_gate()
     }
 
     // Just a helper function to test out `-Z` flags on Cargo
     pub fn print_teapot(&self, config: &Config) {
-        if let Some(teapot) = self.im_a_teapot {
-            if config.cli_unstable().print_im_a_teapot {
-                println!("im-a-teapot = {}", teapot);
-            }
-        }
+        self.common.print_teapot(config);
     }
 }
 
@@ -337,29 +343,28 @@ impl VirtualManifest {
     pub fn new(replace: Vec<(PackageIdSpec, Dependency)>,
                patch: HashMap<Url, Vec<Dependency>>,
                workspace: WorkspaceConfig,
-               profiles: Profiles) -> VirtualManifest {
-        VirtualManifest {
-            replace: replace,
-            patch: patch,
-            workspace: workspace,
-            profiles: profiles,
-        }
+               profiles: Profiles,
+               features: Features,
+               im_a_teapot: Option<bool>) -> CargoResult<VirtualManifest> {
+        let common = CommonManifest { workspace, replace, patch, profiles, features, im_a_teapot };
+        common.feature_gate()?;
+        Ok(VirtualManifest { common })
     }
 
     pub fn replace(&self) -> &[(PackageIdSpec, Dependency)] {
-        &self.replace
+        &self.common.replace
     }
 
     pub fn patch(&self) -> &HashMap<Url, Vec<Dependency>> {
-        &self.patch
+        &self.common.patch
     }
 
     pub fn workspace_config(&self) -> &WorkspaceConfig {
-        &self.workspace
+        &self.common.workspace
     }
 
     pub fn profiles(&self) -> &Profiles {
-        &self.profiles
+        &self.common.profiles
     }
 }
 

@@ -736,7 +736,11 @@ impl TomlManifest {
                 bail!("virtual manifests must be configured with [workspace]");
             }
         };
-        Ok((VirtualManifest::new(replace, patch, workspace_config, profiles), nested_paths))
+        let manifest = VirtualManifest::new(
+            replace, patch, workspace_config, profiles,
+
+        )?;
+        Ok((manifest, nested_paths))
     }
 
     fn replace(&self, cx: &mut Context)
