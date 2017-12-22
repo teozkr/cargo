@@ -1,7 +1,7 @@
 pub use self::cfg::{Cfg, CfgExpr};
 pub use self::config::{Config, ConfigValue, homedir};
 pub use self::dependency_queue::{DependencyQueue, Fresh, Dirty, Freshness};
-pub use self::errors::{CargoResult, CargoResultExt, CargoError, CargoErrorKind, Test, CliResult};
+pub use self::errors::{CargoResult, CargoResultExt, CargoError, Test, CliResult};
 pub use self::errors::{CliError, ProcessError, CargoTestError};
 pub use self::errors::{process_error, internal};
 pub use self::flock::{FileLock, Filesystem};
@@ -18,6 +18,7 @@ pub use self::to_semver::ToSemver;
 pub use self::to_url::ToUrl;
 pub use self::vcs::{GitRepo, HgRepo, PijulRepo, FossilRepo};
 pub use self::read2::read2;
+pub use self::progress::Progress;
 
 pub mod config;
 pub mod errors;
@@ -42,3 +43,4 @@ mod vcs;
 mod lazy_cell;
 mod flock;
 mod read2;
+mod progress;

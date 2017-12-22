@@ -18,15 +18,26 @@ pub fn registry_path() -> PathBuf { paths::root().join("registry") }
 pub fn registry() -> Url { Url::from_file_path(&*registry_path()).ok().unwrap() }
 pub fn dl_path() -> PathBuf { paths::root().join("dl") }
 pub fn dl_url() -> Url { Url::from_file_path(&*dl_path()).ok().unwrap() }
+pub fn alt_registry_path() -> PathBuf { paths::root().join("alternative-registry") }
+pub fn alt_registry() -> Url { Url::from_file_path(&*alt_registry_path()).ok().unwrap() }
+pub fn alt_dl_path() -> PathBuf { paths::root().join("alt_dl") }
+pub fn alt_dl_url() -> String {
+    let base = Url::from_file_path(&*alt_dl_path()).ok().unwrap();
+    format!("{}/{{crate}}/{{version}}/{{crate}}-{{version}}.crate", base)
+}
+pub fn alt_api_path() -> PathBuf { paths::root().join("alt_api") }
+pub fn alt_api_url() -> Url { Url::from_file_path(&*alt_api_path()).ok().unwrap() }
 
 pub struct Package {
     name: String,
     vers: String,
     deps: Vec<Dependency>,
     files: Vec<(String, String)>,
+    extra_files: Vec<(String, String)>,
     yanked: bool,
     features: HashMap<String, Vec<String>>,
     local: bool,
+    alternative: bool,
 }
 
 struct Dependency {
@@ -35,6 +46,7 @@ struct Dependency {
     kind: String,
     target: Option<String>,
     features: Vec<String>,
+    registry: Option<String>,
 }
 
 pub fn init() {
@@ -53,15 +65,26 @@ pub fn init() {
 
         [source.dummy-registry]
         registry = '{reg}'
-    "#, reg = registry()).as_bytes()));
+
+        [registries.alternative]
+        index = '{alt}'
+    "#, reg = registry(), alt = alt_registry()).as_bytes()));
 
     // Init a new registry
-    repo(&registry_path())
+    let _ = repo(&registry_path())
         .file("config.json", &format!(r#"
             {{"dl":"{0}","api":"{0}"}}
         "#, dl_url()))
         .build();
     fs::create_dir_all(dl_path().join("api/v1/crates")).unwrap();
+
+    // Init an alt registry
+    repo(&alt_registry_path())
+        .file("config.json", &format!(r#"
+            {{"dl":"{}","api":"{}"}}
+        "#, alt_dl_url(), alt_api_url()))
+        .build();
+    fs::create_dir_all(alt_api_path().join("api/v1/crates")).unwrap();
 }
 
 impl Package {
@@ -72,9 +95,11 @@ impl Package {
             vers: vers.to_string(),
             deps: Vec::new(),
             files: Vec::new(),
+            extra_files: Vec::new(),
             yanked: false,
             features: HashMap::new(),
             local: false,
+            alternative: false,
         }
     }
 
@@ -83,31 +108,48 @@ impl Package {
         self
     }
 
+    pub fn alternative(&mut self, alternative: bool) -> &mut Package {
+        self.alternative = alternative;
+        self
+    }
+
     pub fn file(&mut self, name: &str, contents: &str) -> &mut Package {
         self.files.push((name.to_string(), contents.to_string()));
         self
     }
 
+    pub fn extra_file(&mut self, name: &str, contents: &str) -> &mut Package {
+        self.extra_files.push((name.to_string(), contents.to_string()));
+        self
+    }
+
     pub fn dep(&mut self, name: &str, vers: &str) -> &mut Package {
-        self.full_dep(name, vers, None, "normal", &[])
+        self.full_dep(name, vers, None, "normal", &[], None)
     }
 
     pub fn feature_dep(&mut self,
                        name: &str,
                        vers: &str,
                        features: &[&str]) -> &mut Package {
-        self.full_dep(name, vers, None, "normal", features)
+        self.full_dep(name, vers, None, "normal", features, None)
     }
 
     pub fn target_dep(&mut self,
                       name: &str,
                       vers: &str,
                       target: &str) -> &mut Package {
-        self.full_dep(name, vers, Some(target), "normal", &[])
+        self.full_dep(name, vers, Some(target), "normal", &[], None)
+    }
+
+    pub fn registry_dep(&mut self,
+                        name: &str,
+                        vers: &str,
+                        registry: &str) -> &mut Package {
+        self.full_dep(name, vers, None, "normal", &[], Some(registry))
     }
 
     pub fn dev_dep(&mut self, name: &str, vers: &str) -> &mut Package {
-        self.full_dep(name, vers, None, "dev", &[])
+        self.full_dep(name, vers, None, "dev", &[], None)
     }
 
     fn full_dep(&mut self,
@@ -115,13 +157,15 @@ impl Package {
                 vers: &str,
                 target: Option<&str>,
                 kind: &str,
-                features: &[&str]) -> &mut Package {
+                features: &[&str],
+                registry: Option<&str>) -> &mut Package {
         self.deps.push(Dependency {
             name: name.to_string(),
             vers: vers.to_string(),
             kind: kind.to_string(),
             target: target.map(|s| s.to_string()),
             features: features.iter().map(|s| s.to_string()).collect(),
+            registry: registry.map(|s| s.to_string()),
         });
         self
     }
@@ -144,6 +188,7 @@ impl Package {
                 "target": dep.target,
                 "optional": false,
                 "kind": dep.kind,
+                "registry": dep.registry,
             })
         }).collect::<Vec<_>>();
         let cksum = {
@@ -167,11 +212,13 @@ impl Package {
             _ => format!("{}/{}/{}", &self.name[0..2], &self.name[2..4], self.name),
         };
 
+        let registry_path = if self.alternative { alt_registry_path() } else { registry_path() };
+
         // Write file/line in the index
         let dst = if self.local {
-            registry_path().join("index").join(&file)
+            registry_path.join("index").join(&file)
         } else {
-            registry_path().join(&file)
+            registry_path.join(&file)
         };
         let mut prev = String::new();
         let _ = File::open(&dst).and_then(|mut f| f.read_to_string(&mut prev));
@@ -181,7 +228,7 @@ impl Package {
 
         // Add the new file to the index
         if !self.local {
-            let repo = t!(git2::Repository::open(&registry_path()));
+            let repo = t!(git2::Repository::open(&registry_path));
             let mut index = t!(repo.index());
             t!(index.add_path(Path::new(&file)));
             t!(index.write());
@@ -235,14 +282,22 @@ impl Package {
                 self.append(&mut a, name, contents);
             }
         }
+        for &(ref name, ref contents) in self.extra_files.iter() {
+            self.append_extra(&mut a, name, contents);
+        }
     }
 
     fn append<W: Write>(&self, ar: &mut Builder<W>, file: &str, contents: &str) {
+        self.append_extra(ar,
+                          &format!("{}-{}/{}", self.name, self.vers, file),
+                          contents);
+    }
+
+    fn append_extra<W: Write>(&self, ar: &mut Builder<W>, path: &str, contents: &str) {
         let mut header = Header::new_ustar();
         header.set_size(contents.len() as u64);
-        t!(header.set_path(format!("{}-{}/{}", self.name, self.vers, file)));
+        t!(header.set_path(path));
         header.set_cksum();
-
         t!(ar.append(&header, contents.as_bytes()));
     }
 
@@ -250,6 +305,11 @@ impl Package {
         if self.local {
             registry_path().join(format!("{}-{}.crate", self.name,
                                          self.vers))
+        } else if self.alternative {
+            alt_dl_path()
+                .join(&self.name)
+                .join(&self.vers)
+                .join(&format!("{}-{}.crate", self.name, self.vers))
         } else {
             dl_path().join(&self.name).join(&self.vers).join("download")
         }

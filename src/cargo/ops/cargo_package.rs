@@ -23,13 +23,17 @@ pub struct PackageOpts<'cfg> {
     pub verify: bool,
     pub jobs: Option<u32>,
     pub target: Option<&'cfg str>,
+    pub registry: Option<String>,
 }
 
 pub fn package(ws: &Workspace,
                opts: &PackageOpts) -> CargoResult<Option<FileLock>> {
     let pkg = ws.current()?;
     let config = ws.config();
-    if pkg.manifest().features().activated().len() > 0 {
+
+    // Allow packaging if a registry has been provided, or if there are no nightly
+    // features enabled.
+    if opts.registry.is_none() && !pkg.manifest().features().activated().is_empty() {
         bail!("cannot package or publish crates which activate nightly-only \
                cargo features")
     }
@@ -42,12 +46,12 @@ pub fn package(ws: &Workspace,
         check_metadata(pkg, config)?;
     }
 
-    verify_dependencies(&pkg)?;
+    verify_dependencies(pkg)?;
 
     if opts.list {
         let root = pkg.root();
-        let mut list: Vec<_> = src.list_files(&pkg)?.iter().map(|file| {
-            util::without_prefix(&file, &root).unwrap().to_path_buf()
+        let mut list: Vec<_> = src.list_files(pkg)?.iter().map(|file| {
+            util::without_prefix(file, root).unwrap().to_path_buf()
         }).collect();
         list.sort();
         for file in list.iter() {
@@ -57,7 +61,7 @@ pub fn package(ws: &Workspace,
     }
 
     if !opts.allow_dirty {
-        check_not_dirty(&pkg, &src)?;
+        check_not_dirty(pkg, &src)?;
     }
 
     let filename = format!("{}-{}.crate", pkg.name(), pkg.version());
@@ -74,11 +78,11 @@ pub fn package(ws: &Workspace,
     config.shell().status("Packaging", pkg.package_id().to_string())?;
     dst.file().set_len(0)?;
     tar(ws, &src, dst.file(), &filename).chain_err(|| {
-        "failed to prepare local package for uploading"
+        format_err!("failed to prepare local package for uploading")
     })?;
     if opts.verify {
         dst.seek(SeekFrom::Start(0))?;
-        run_verify(ws, dst.file(), opts).chain_err(|| {
+        run_verify(ws, &dst, opts).chain_err(|| {
             "failed to verify package tarball"
         })?
     }
@@ -118,7 +122,7 @@ fn check_metadata(pkg: &Package, config: &Config) -> CargoResult<()> {
         if !things.is_empty() {
             things.push_str(" or ");
         }
-        things.push_str(&missing.last().unwrap());
+        things.push_str(missing.last().unwrap());
 
         config.shell().warn(
             &format!("manifest has no {things}.\n\
@@ -131,12 +135,10 @@ fn check_metadata(pkg: &Package, config: &Config) -> CargoResult<()> {
 // check that the package dependencies are safe to deploy.
 fn verify_dependencies(pkg: &Package) -> CargoResult<()> {
     for dep in pkg.dependencies() {
-        if dep.source_id().is_path() {
-            if !dep.specified_req() {
-                bail!("all path dependencies must have a version specified \
-                       when packaging.\ndependency `{}` does not specify \
-                       a version.", dep.name())
-            }
+        if dep.source_id().is_path() && !dep.specified_req() {
+            bail!("all path dependencies must have a version specified \
+                    when packaging.\ndependency `{}` does not specify \
+                    a version.", dep.name())
         }
     }
     Ok(())
@@ -202,11 +204,11 @@ fn tar(ws: &Workspace,
     let config = ws.config();
     let root = pkg.root();
     for file in src.list_files(pkg)?.iter() {
-        let relative = util::without_prefix(&file, &root).unwrap();
+        let relative = util::without_prefix(file, root).unwrap();
         check_filename(relative)?;
         let relative = relative.to_str().ok_or_else(|| {
-            format!("non-utf8 path in source directory: {}",
-                    relative.display())
+            format_err!("non-utf8 path in source directory: {}",
+                        relative.display())
         })?;
         config.shell().verbose(|shell| {
             shell.status("Archiving", &relative)
@@ -253,7 +255,7 @@ fn tar(ws: &Workspace,
             })?;
 
             let mut header = Header::new_ustar();
-            let toml = pkg.to_registry_toml();
+            let toml = pkg.to_registry_toml()?;
             header.set_path(&path)?;
             header.set_entry_type(EntryType::file());
             header.set_mode(0o644);
@@ -274,15 +276,14 @@ fn tar(ws: &Workspace,
     Ok(())
 }
 
-fn run_verify(ws: &Workspace, tar: &File, opts: &PackageOpts) -> CargoResult<()> {
+fn run_verify(ws: &Workspace, tar: &FileLock, opts: &PackageOpts) -> CargoResult<()> {
     let config = ws.config();
     let pkg = ws.current()?;
 
     config.shell().status("Verifying", pkg)?;
 
-    let f = GzDecoder::new(tar)?;
-    let dst = pkg.root().join(&format!("target/package/{}-{}",
-                                       pkg.name(), pkg.version()));
+    let f = GzDecoder::new(tar.file())?;
+    let dst = tar.parent().join(&format!("{}-{}", pkg.name(), pkg.version()));
     if fs::metadata(&dst).is_ok() {
         fs::remove_dir_all(&dst)?;
     }
@@ -334,7 +335,7 @@ fn check_filename(file: &Path) -> CargoResult<()> {
         }
     };
     let bad_chars = ['/', '\\', '<', '>', ':', '"', '|', '?', '*'];
-    for c in bad_chars.iter().filter(|c| name.contains(**c)) {
+    if let Some(c) = bad_chars.iter().find(|c| name.contains(**c)) {
         bail!("cannot package a filename with a special character `{}`: {}",
               c, file.display())
     }

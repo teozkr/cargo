@@ -2,7 +2,7 @@ use std::env;
 
 use cargo::core::Workspace;
 use cargo::ops::{self, MessageFormat, Packages};
-use cargo::util::{CliResult, CliError, Config, CargoErrorKind};
+use cargo::util::{CliResult, CliError, Config};
 use cargo::util::important_paths::find_root_manifest_for_wd;
 
 #[derive(Deserialize)]
@@ -101,7 +101,7 @@ for the --jobs argument is the number of CPUs. If you want to control the
 number of simultaneous running test cases, pass the `--test-threads` option
 to the test binaries:
 
-  cargo test -- --test-threads=1
+    cargo test -- --test-threads=1
 
 Compilation can be configured via the `test` profile in the manifest.
 
@@ -109,14 +109,14 @@ By default the rust test harness hides output from test execution to
 keep results readable. Test output can be recovered (e.g. for debugging)
 by passing `--nocapture` to the test binaries:
 
-  cargo test -- --nocapture
+    cargo test -- --nocapture
 
 To get the list of all options available for the test binaries use this:
 
-  cargo test -- --help
+    cargo test -- --help
 ";
 
-pub fn execute(options: Options, config: &Config) -> CliResult {
+pub fn execute(options: Options, config: &mut Config) -> CliResult {
     debug!("executing; cmd=cargo-test; args={:?}",
            env::args().collect::<Vec<_>>());
 
@@ -147,8 +147,7 @@ pub fn execute(options: Options, config: &Config) -> CliResult {
                                          options.flag_all_targets);
     }
 
-    let spec = Packages::from_flags(ws.is_virtual(),
-                                    options.flag_all,
+    let spec = Packages::from_flags(options.flag_all,
                                     &options.flag_exclude,
                                     &options.flag_package)?;
 
@@ -178,8 +177,8 @@ pub fn execute(options: Options, config: &Config) -> CliResult {
         None => Ok(()),
         Some(err) => {
             Err(match err.exit.as_ref().and_then(|e| e.code()) {
-                Some(i) => CliError::new(err.hint().into(), i),
-                None => CliError::new(CargoErrorKind::CargoTestErrorKind(err).into(), 101),
+                Some(i) => CliError::new(format_err!("{}", err.hint()), i),
+                None => CliError::new(err.into(), 101),
             })
         }
     }

@@ -328,7 +328,7 @@ Cargo will take the latest commit and write that information out into our
 `Cargo.lock` when we build for the first time. That file will look like this:
 
 ```toml
-[root]
+[[package]]
 name = "hello_world"
 version = "0.1.0"
 dependencies = [
@@ -422,7 +422,7 @@ information.
 
 ## Build cache
 
-Cargo shares build artifacts among all the packages of a single workspaces.
+Cargo shares build artifacts among all the packages of a single workspace.
 Today, Cargo does not share build results across different workspaces, but 
 a similar result can be achieved by using a third party tool, [sccache].
 

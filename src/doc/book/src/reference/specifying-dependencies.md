@@ -31,8 +31,8 @@ An update is allowed if the new version number does not modify the left-most
 non-zero digit in the major, minor, patch grouping. In this case, if we ran
 `cargo update -p time`, cargo would update us to version `0.1.13` if it was
 available, but would not update us to `0.2.0`. If instead we had specified the
-version string as `^1.0`, cargo would update to `1.1` but not `2.0`. `0.0.x` is
-not considered compatible with any other version.
+version string as `^1.0`, cargo would update to `1.1` but not `2.0`. The version
+`0.0.x` is not considered compatible with any other version.
 
 Here are some more examples of caret requirements and the versions that would
 be allowed with them:
@@ -154,8 +154,7 @@ all of its own dependencies, and others can also start using the crate as well.
 However, crates that use dependencies specified with only a path are not
 permitted on [crates.io]. If we wanted to publish our `hello_world` crate, we
 would need to publish a version of `hello_utils` to [crates.io](https://crates.io)
-(or specify a `git` repository location) and specify its version in
-the dependencies line as well:
+and specify its version in the dependencies line as well:
 
 ```toml
 [dependencies]
@@ -385,7 +384,7 @@ Path overrides are specified through `.cargo/config` instead of `Cargo.toml`,
 and you can find [more documentation about this configuration][config-docs].
 Inside of `.cargo/config` you'll specify a key called `paths`:
 
-[config-docs]: config.html
+[config-docs]: reference/config.html
 
 ```toml
 paths = ["/path/to/uuid"]

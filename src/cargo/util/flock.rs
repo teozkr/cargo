@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::*;
+use std::io::{Seek, Read, Write, SeekFrom};
 use std::io;
 use std::path::{Path, PathBuf, Display};
 
@@ -9,7 +9,7 @@ use fs2::{FileExt, lock_contended_error};
 use libc;
 
 use util::Config;
-use util::errors::{CargoResult, CargoResultExt};
+use util::errors::{CargoResult, CargoResultExt, CargoError};
 
 pub struct FileLock {
     f: Option<File>,
@@ -140,7 +140,7 @@ impl Filesystem {
     /// Handles errors where other Cargo processes are also attempting to
     /// concurrently create this directory.
     pub fn create_dir(&self) -> io::Result<()> {
-        return create_dir_all(&self.root);
+        create_dir_all(&self.root)
     }
 
     /// Returns an adaptor that can be used to print the path of this
@@ -233,6 +233,18 @@ impl Filesystem {
     }
 }
 
+impl PartialEq<Path> for Filesystem {
+    fn eq(&self, other: &Path) -> bool {
+        self.root == other
+    }
+}
+
+impl PartialEq<Filesystem> for Path {
+    fn eq(&self, other: &Filesystem) -> bool {
+        self == other.root
+    }
+}
+
 /// Acquires a lock on a file in a "nice" manner.
 ///
 /// Almost all long-running blocking actions in Cargo have a status message
@@ -283,18 +295,19 @@ fn acquire(config: &Config,
 
         Err(e) => {
             if e.raw_os_error() != lock_contended_error().raw_os_error() {
-                return Err(e).chain_err(|| {
-                    format!("failed to lock file: {}", path.display())
-                })
+                let e = CargoError::from(e);
+                let cx = format!("failed to lock file: {}", path.display());
+                return Err(e.context(cx).into())
             }
         }
     }
     let msg = format!("waiting for file lock on {}", msg);
     config.shell().status_with_color("Blocking", &msg, Cyan)?;
 
-    return block().chain_err(|| {
+    block().chain_err(|| {
         format!("failed to lock file: {}", path.display())
-    });
+    })?;
+    return Ok(());
 
     #[cfg(all(target_os = "linux", not(target_env = "musl")))]
     fn is_on_nfs_mount(path: &Path) -> bool {
@@ -323,7 +336,7 @@ fn acquire(config: &Config,
 
 fn create_dir_all(path: &Path) -> io::Result<()> {
     match create_dir(path) {
-        Ok(()) => return Ok(()),
+        Ok(()) => Ok(()),
         Err(e) => {
             if e.kind() == io::ErrorKind::NotFound {
                 if let Some(p) = path.parent() {

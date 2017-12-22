@@ -44,7 +44,7 @@ Options:
     -Z FLAG ...             Unstable (nightly-only) flags to Cargo
 ";
 
-pub fn execute(options: Options, config: &Config) -> CliResult {
+pub fn execute(options: Options, config: &mut Config) -> CliResult {
     config.configure(options.flag_verbose,
                      options.flag_quiet,
                      &options.flag_color,
@@ -61,6 +61,7 @@ pub fn execute(options: Options, config: &Config) -> CliResult {
         allow_dirty: options.flag_allow_dirty,
         target: options.flag_target.as_ref().map(|t| &t[..]),
         jobs: options.flag_jobs,
+        registry: None,
     })?;
     Ok(())
 }

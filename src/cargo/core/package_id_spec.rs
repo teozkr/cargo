@@ -6,7 +6,7 @@ use url::Url;
 
 use core::PackageId;
 use util::{ToUrl, ToSemver};
-use util::errors::{CargoError, CargoResult, CargoResultExt};
+use util::errors::{CargoResult, CargoResultExt};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PackageIdSpec {
@@ -17,7 +17,7 @@ pub struct PackageIdSpec {
 
 impl PackageIdSpec {
     pub fn parse(spec: &str) -> CargoResult<PackageIdSpec> {
-        if spec.contains("/") {
+        if spec.contains('/') {
             if let Ok(url) = spec.to_url() {
                 return PackageIdSpec::from_url(url);
             }
@@ -49,7 +49,7 @@ impl PackageIdSpec {
         where I: IntoIterator<Item=&'a PackageId>
     {
         let spec = PackageIdSpec::parse(spec).chain_err(|| {
-            format!("invalid package id specification: `{}`", spec)
+            format_err!("invalid package id specification: `{}`", spec)
         })?;
         spec.query(i)
     }
@@ -70,11 +70,11 @@ impl PackageIdSpec {
         url.set_fragment(None);
         let (name, version) = {
             let mut path = url.path_segments().ok_or_else(|| {
-                CargoError::from(format!("pkgid urls must have a path: {}", url))
+                format_err!("pkgid urls must have a path: {}", url)
             })?;
             let path_name = path.next_back().ok_or_else(|| {
-                CargoError::from(format!("pkgid urls must have at least one path \
-                                          component: {}", url))
+                format_err!("pkgid urls must have at least one path \
+                             component: {}", url)
             })?;
             match frag {
                 Some(fragment) => {
@@ -117,9 +117,10 @@ impl PackageIdSpec {
     pub fn matches(&self, package_id: &PackageId) -> bool {
         if self.name() != package_id.name() { return false }
 
-        match self.version {
-            Some(ref v) => if v != package_id.version() { return false },
-            None => {}
+        if let Some(ref v) = self.version {
+            if v != package_id.version() {
+                return false;
+            }
         }
 
         match self.url {
@@ -148,20 +149,20 @@ impl PackageIdSpec {
                                       self.name(), self);
                 let mut vec = vec![ret, other];
                 vec.extend(ids);
-                minimize(&mut msg, vec, self);
-                Err(msg.into())
+                minimize(&mut msg, &vec, self);
+                Err(format_err!("{}", msg))
             }
             None => Ok(ret)
         };
 
         fn minimize(msg: &mut String,
-                    ids: Vec<&PackageId>,
+                    ids: &[&PackageId],
                     spec: &PackageIdSpec) {
             let mut version_cnt = HashMap::new();
-            for id in ids.iter() {
+            for id in ids {
                 *version_cnt.entry(id.version()).or_insert(0) += 1;
             }
-            for id in ids.iter() {
+            for id in ids {
                 if version_cnt[id.version()] == 1 {
                     msg.push_str(&format!("\n  {}:{}", spec.name(),
                                           id.version()));
@@ -184,18 +185,15 @@ impl fmt::Display for PackageIdSpec {
                 } else {
                     write!(f, "{}", url)?;
                 }
-                if url.path_segments().unwrap().next_back().unwrap() != &self.name {
+                if url.path_segments().unwrap().next_back().unwrap() != self.name {
                     printed_name = true;
                     write!(f, "#{}", self.name)?;
                 }
             }
             None => { printed_name = true; write!(f, "{}", self.name)? }
         }
-        match self.version {
-            Some(ref v) => {
-                write!(f, "{}{}", if printed_name {":"} else {"#"}, v)?;
-            }
-            None => {}
+        if let Some(ref v) = self.version {
+            write!(f, "{}{}", if printed_name {":"} else {"#"}, v)?;
         }
         Ok(())
     }

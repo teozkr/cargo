@@ -10,8 +10,7 @@ use hamcrest::assert_that;
 
 #[test]
 fn profile_overrides() {
-    let mut p = project("foo");
-    p = p
+    let p = project("foo")
         .file("Cargo.toml", r#"
             [package]
 
@@ -24,8 +23,9 @@ fn profile_overrides() {
             debug = false
             rpath = true
         "#)
-        .file("src/lib.rs", "");
-    assert_that(p.cargo_process("build").arg("-v"),
+        .file("src/lib.rs", "")
+        .build();
+    assert_that(p.cargo("build").arg("-v"),
                 execs().with_status(0).with_stderr(&format!("\
 [COMPILING] test v0.0.0 ({url})
 [RUNNING] `rustc --crate-name test src[/]lib.rs --crate-type lib \
@@ -45,8 +45,7 @@ url = p.url(),
 
 #[test]
 fn opt_level_override_0() {
-    let mut p = project("foo");
-    p = p
+    let p = project("foo")
         .file("Cargo.toml", r#"
             [package]
 
@@ -57,8 +56,9 @@ fn opt_level_override_0() {
             [profile.dev]
             opt-level = 0
         "#)
-        .file("src/lib.rs", "");
-    assert_that(p.cargo_process("build").arg("-v"),
+        .file("src/lib.rs", "")
+        .build();
+    assert_that(p.cargo("build").arg("-v"),
                 execs().with_status(0).with_stderr(&format!("\
 [COMPILING] test v0.0.0 ({url})
 [RUNNING] `rustc --crate-name test src[/]lib.rs --crate-type lib \
@@ -76,9 +76,7 @@ url = p.url()
 
 #[test]
 fn debug_override_1() {
-    let mut p = project("foo");
-
-    p = p
+    let p = project("foo")
         .file("Cargo.toml", r#"
             [package]
             name = "test"
@@ -88,8 +86,9 @@ fn debug_override_1() {
             [profile.dev]
             debug = 1
         "#)
-        .file("src/lib.rs", "");
-    assert_that(p.cargo_process("build").arg("-v"),
+        .file("src/lib.rs", "")
+        .build();
+    assert_that(p.cargo("build").arg("-v"),
                 execs().with_status(0).with_stderr(&format!("\
 [COMPILING] test v0.0.0 ({url})
 [RUNNING] `rustc --crate-name test src[/]lib.rs --crate-type lib \
@@ -106,8 +105,7 @@ url = p.url()
 }
 
 fn check_opt_level_override(profile_level: &str, rustc_level: &str) {
-    let mut p = project("foo");
-    p = p
+    let p = project("foo")
         .file("Cargo.toml", &format!(r#"
             [package]
 
@@ -118,8 +116,9 @@ fn check_opt_level_override(profile_level: &str, rustc_level: &str) {
             [profile.dev]
             opt-level = {level}
         "#, level = profile_level))
-        .file("src/lib.rs", "");
-    assert_that(p.cargo_process("build").arg("-v"),
+        .file("src/lib.rs", "")
+        .build();
+    assert_that(p.cargo("build").arg("-v"),
                 execs().with_status(0).with_stderr(&format!("\
 [COMPILING] test v0.0.0 ({url})
 [RUNNING] `rustc --crate-name test src[/]lib.rs --crate-type lib \
@@ -155,8 +154,7 @@ fn opt_level_overrides() {
 
 #[test]
 fn top_level_overrides_deps() {
-    let mut p = project("foo");
-    p = p
+    let p = project("foo")
         .file("Cargo.toml", r#"
             [package]
 
@@ -187,8 +185,9 @@ fn top_level_overrides_deps() {
             name = "foo"
             crate_type = ["dylib", "rlib"]
         "#)
-        .file("foo/src/lib.rs", "");
-    assert_that(p.cargo_process("build").arg("-v").arg("--release"),
+        .file("foo/src/lib.rs", "")
+        .build();
+    assert_that(p.cargo("build").arg("-v").arg("--release"),
                 execs().with_status(0).with_stderr(&format!("\
 [COMPILING] foo v0.0.0 ({url}/foo)
 [RUNNING] `rustc --crate-name foo foo[/]src[/]lib.rs \
@@ -245,9 +244,10 @@ fn profile_in_non_root_manifest_triggers_a_warning() {
             [profile.dev]
             opt-level = 1
         "#)
-        .file("bar/src/main.rs", "fn main() {}");
+        .file("bar/src/main.rs", "fn main() {}")
+        .build();
 
-    assert_that(p.cargo_process("build").cwd(p.root().join("bar")).arg("-v"),
+    assert_that(p.cargo("build").cwd(p.root().join("bar")).arg("-v"),
                 execs().with_status(0).with_stderr("\
 [WARNING] profiles for the non root package will be ignored, specify profiles at the workspace root:
 package:   [..]
@@ -276,9 +276,10 @@ fn profile_in_virtual_manifest_works() {
             authors = []
             workspace = ".."
         "#)
-        .file("bar/src/main.rs", "fn main() {}");
+        .file("bar/src/main.rs", "fn main() {}")
+        .build();
 
-    assert_that(p.cargo_process("build").cwd(p.root().join("bar")).arg("-v"),
+    assert_that(p.cargo("build").cwd(p.root().join("bar")).arg("-v"),
                 execs().with_status(0).with_stderr("\
 [COMPILING] bar v0.1.0 ([..])
 [RUNNING] `rustc [..]`

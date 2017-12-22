@@ -32,7 +32,7 @@ pub fn resolve_ws_precisely<'a>(ws: &Workspace<'a>,
     let features = features.iter()
         .flat_map(|s| s.split_whitespace())
         .flat_map(|s| s.split(','))
-        .filter(|s| s.len() > 0)
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect::<Vec<String>>();
 
@@ -257,20 +257,16 @@ pub fn resolve_with_previous<'a>(registry: &mut PackageRegistry,
         None => root_replace.to_vec(),
     };
 
-    let config = if warn {
-        Some(ws.config())
-    } else {
-        None
-    };
     let mut resolved = resolver::resolve(&summaries,
                                          &replace,
                                          registry,
-                                         config)?;
+                                         Some(ws.config()),
+                                         warn)?;
     resolved.register_used_patches(registry.patches());
     if let Some(previous) = previous {
         resolved.merge_from(previous)?;
     }
-    return Ok(resolved);
+    Ok(resolved)
 }
 
 /// Read the `paths` configuration variable to discover all path overrides that

@@ -16,6 +16,7 @@ pub struct Options {
     arg_query: Vec<String>,
     #[serde(rename = "flag_Z")]
     flag_z: Vec<String>,
+    flag_registry: Option<String>,
 }
 
 pub const USAGE: &'static str = "
@@ -28,7 +29,7 @@ Usage:
 Options:
     -h, --help               Print this message
     --index INDEX            Registry index to search in
-    --host HOST              DEPRICATED, renamed to '--index'
+    --host HOST              DEPRECATED, renamed to '--index'
     -v, --verbose ...        Use verbose output (-vv very verbose/build.rs output)
     -q, --quiet              No output printed to stdout
     --color WHEN             Coloring: auto, always, never
@@ -36,9 +37,10 @@ Options:
     --frozen                 Require Cargo.lock and cache are up to date
     --locked                 Require Cargo.lock is up to date
     -Z FLAG ...              Unstable (nightly-only) flags to Cargo
+    --registry REGISTRY      Registry to use
 ";
 
-pub fn execute(options: Options, config: &Config) -> CliResult {
+pub fn execute(options: Options, config: &mut Config) -> CliResult {
     config.configure(options.flag_verbose,
                      options.flag_quiet,
                      &options.flag_color,
@@ -50,8 +52,14 @@ pub fn execute(options: Options, config: &Config) -> CliResult {
         flag_host: host,    // TODO: Depricated, remove
         flag_limit: limit,
         arg_query: query,
+        flag_registry: registry,
         ..
     } = options;
+
+    if registry.is_some() && !config.cli_unstable().unstable_options {
+        return Err(format_err!("registry option is an unstable feature and \
+                                requires -Zunstable-options to use.").into())
+    }
 
     // TODO: Depricated
     // remove once it has been decided --host can be safely removed
@@ -77,6 +85,6 @@ about this warning.";
         host
     };
 
-    ops::search(&query.join("+"), config, index, cmp::min(100, limit.unwrap_or(10)) as u8)?;
+    ops::search(&query.join("+"), config, index, cmp::min(100, limit.unwrap_or(10)) as u8, registry)?;
     Ok(())
 }

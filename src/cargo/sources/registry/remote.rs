@@ -1,21 +1,22 @@
 use std::cell::{RefCell, Ref, Cell};
+use std::fmt::Write as FmtWrite;
 use std::io::SeekFrom;
 use std::io::prelude::*;
 use std::mem;
 use std::path::Path;
+use std::str;
 
 use git2;
 use hex::ToHex;
 use serde_json;
 
 use core::{PackageId, SourceId};
-use ops;
 use sources::git;
-use sources::registry::{RegistryData, RegistryConfig, INDEX_LOCK};
+use sources::registry::{RegistryData, RegistryConfig, INDEX_LOCK, CRATE_TEMPLATE, VERSION_TEMPLATE};
 use util::network;
 use util::{FileLock, Filesystem, LazyCell};
-use util::{Config, Sha256, ToUrl};
-use util::errors::{CargoErrorKind, CargoResult, CargoResultExt};
+use util::{Config, Sha256, ToUrl, Progress};
+use util::errors::{CargoResult, CargoResultExt, HttpNot200};
 
 pub struct RemoteRegistry<'cfg> {
     index_path: Filesystem,
@@ -130,7 +131,7 @@ impl<'cfg> RegistryData for RemoteRegistry<'cfg> {
         let repo = self.repo()?;
         let tree = self.tree()?;
         let entry = tree.get_path(path)?;
-        let object = entry.to_object(&repo)?;
+        let object = entry.to_object(repo)?;
         let blob = match object.as_blob() {
             Some(blob) => blob,
             None => bail!("path `{}` is not a blob in the git repo", path.display()),
@@ -145,7 +146,7 @@ impl<'cfg> RegistryData for RemoteRegistry<'cfg> {
                                             "the registry index")?;
         let mut config = None;
         self.load(Path::new(""), Path::new("config.json"), &mut |json| {
-            config = Some(serde_json::from_slice(&json)?);
+            config = Some(serde_json::from_slice(json)?);
             Ok(())
         })?;
         Ok(config)
@@ -158,7 +159,7 @@ impl<'cfg> RegistryData for RemoteRegistry<'cfg> {
         //
         // This way if there's a problem the error gets printed before we even
         // hit the index, which may not actually read this configuration.
-        ops::http_handle(self.config)?;
+        self.config.http()?;
 
         self.repo()?;
         self.head.set(None);
@@ -166,8 +167,7 @@ impl<'cfg> RegistryData for RemoteRegistry<'cfg> {
         let _lock = self.index_path.open_rw(Path::new(INDEX_LOCK),
                                             self.config,
                                             "the registry index")?;
-        self.config.shell().status("Updating",
-             format!("registry `{}`", self.source_id.url()))?;
+        self.config.shell().status("Updating", self.source_id.display_registry())?;
 
         // git fetch origin master
         let url = self.source_id.url();
@@ -204,11 +204,14 @@ impl<'cfg> RegistryData for RemoteRegistry<'cfg> {
         self.config.shell().status("Downloading", pkg)?;
 
         let config = self.config()?.unwrap();
-        let mut url = config.dl.to_url()?;
-        url.path_segments_mut().unwrap()
-            .push(pkg.name())
-            .push(&pkg.version().to_string())
-            .push("download");
+        let mut url = config.dl.clone();
+        if !url.contains(CRATE_TEMPLATE) && !url.contains(VERSION_TEMPLATE) {
+            write!(url, "/{}/{}/download", CRATE_TEMPLATE, VERSION_TEMPLATE).unwrap();
+        }
+        let url = url
+            .replace(CRATE_TEMPLATE, pkg.name())
+            .replace(VERSION_TEMPLATE, &pkg.version().to_string())
+            .to_url()?;
 
         // TODO: don't download into memory, but ensure that if we ctrl-c a
         //       download we should resume either from the start or the middle
@@ -223,8 +226,13 @@ impl<'cfg> RegistryData for RemoteRegistry<'cfg> {
         network::with_retry(self.config, || {
             state = Sha256::new();
             body = Vec::new();
+            let mut pb = Progress::new("Fetch", self.config);
             {
+                handle.progress(true)?;
                 let mut handle = handle.transfer();
+                handle.progress_function(|dl_total, dl_cur, _, _| {
+                    pb.tick(dl_cur as usize, dl_total as usize).is_ok()
+                })?;
                 handle.write_function(|buf| {
                     state.update(buf);
                     body.extend_from_slice(buf);
@@ -235,7 +243,7 @@ impl<'cfg> RegistryData for RemoteRegistry<'cfg> {
             let code = handle.response_code()?;
             if code != 200 && code != 0 {
                 let url = handle.effective_url()?.unwrap_or(&url);
-                Err(CargoErrorKind::HttpNot200(code, url.to_string()).into())
+                Err(HttpNot200 { code, url: url.to_string() }.into())
             } else {
                 Ok(())
             }

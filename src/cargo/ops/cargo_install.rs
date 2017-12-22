@@ -1,8 +1,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
-use std::ffi::OsString;
-use std::fs::{self, File};
+use std::{env, fs};
 use std::io::prelude::*;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
@@ -18,7 +16,7 @@ use ops::{self, CompileFilter, DefaultExecutor};
 use sources::{GitSource, PathSource, SourceConfigMap};
 use util::{Config, internal};
 use util::{Filesystem, FileLock};
-use util::errors::{CargoError, CargoResult, CargoResultExt};
+use util::errors::{CargoResult, CargoResultExt};
 
 #[derive(Deserialize, Serialize)]
 #[serde(untagged)]
@@ -64,7 +62,7 @@ pub fn install(root: Option<&str>,
     let map = SourceConfigMap::new(opts.config)?;
 
     let (installed_anything, scheduled_error) = if krates.len() <= 1 {
-        install_one(root.clone(), map, krates.into_iter().next(), source_id, vers, opts,
+        install_one(&root, &map, krates.into_iter().next(), source_id, vers, opts,
                     force, true)?;
         (true, false)
     } else {
@@ -74,7 +72,8 @@ pub fn install(root: Option<&str>,
         for krate in krates {
             let root = root.clone();
             let map = map.clone();
-            match install_one(root, map, Some(krate), source_id, vers, opts, force, first) {
+            match install_one(&root, &map, Some(krate), source_id, vers,
+                              opts, force, first) {
                 Ok(()) => succeeded.push(krate),
                 Err(e) => {
                     ::handle_error(e, &mut opts.config.shell());
@@ -92,7 +91,7 @@ pub fn install(root: Option<&str>,
             summary.push(format!("Failed to install {} (see error(s) above).", failed.join(", ")));
         }
         if !succeeded.is_empty() || !failed.is_empty() {
-            opts.config.shell().status("\nSummary:", summary.join(" "))?;
+            opts.config.shell().status("Summary", summary.join(" "))?;
         }
 
         (!succeeded.is_empty(), !failed.is_empty())
@@ -102,7 +101,7 @@ pub fn install(root: Option<&str>,
         // Print a warning that if this directory isn't in PATH that they won't be
         // able to run these commands.
         let dst = metadata(opts.config, &root)?.parent().join("bin");
-        let path = env::var_os("PATH").unwrap_or(OsString::new());
+        let path = env::var_os("PATH").unwrap_or_default();
         for path in env::split_paths(&path) {
             if path == dst {
                 return Ok(())
@@ -121,8 +120,8 @@ pub fn install(root: Option<&str>,
     Ok(())
 }
 
-fn install_one(root: Filesystem,
-               map: SourceConfigMap,
+fn install_one(root: &Filesystem,
+               map: &SourceConfigMap,
                krate: Option<&str>,
                source_id: &SourceId,
                vers: Option<&str>,
@@ -137,13 +136,14 @@ fn install_one(root: Filesystem,
                    krate, vers, config, is_first_install,
                    &mut |git| git.read_packages())?
     } else if source_id.is_path() {
-        let path = source_id.url().to_file_path()
-                            .map_err(|()| CargoError::from("path sources must have a valid path"))?;
+        let path = source_id.url().to_file_path().map_err(|()| {
+            format_err!("path sources must have a valid path")
+        })?;
         let mut src = PathSource::new(&path, source_id, config);
         src.update().chain_err(|| {
-            format!("`{}` is not a crate root; specify a crate to \
-                     install from crates.io, or use --path or --git to \
-                     specify an alternate source", path.display())
+            format_err!("`{}` is not a crate root; specify a crate to \
+                         install from crates.io, or use --path or --git to \
+                         specify an alternate source", path.display())
         })?;
         select_pkg(PathSource::new(&path, source_id, config),
                    krate, vers, config, is_first_install,
@@ -151,9 +151,11 @@ fn install_one(root: Filesystem,
     } else {
         select_pkg(map.load(source_id)?,
                    krate, vers, config, is_first_install,
-                   &mut |_| Err("must specify a crate to install from \
-                                 crates.io, or use --path or --git to \
-                                 specify alternate source".into()))?
+                   &mut |_| {
+                        bail!("must specify a crate to install from \
+                               crates.io, or use --path or --git to \
+                               specify alternate source")
+                   })?
     };
 
     let mut td_opt = None;
@@ -179,8 +181,8 @@ fn install_one(root: Filesystem,
     // We have to check this again afterwards, but may as well avoid building
     // anything if we're gonna throw it away anyway.
     {
-        let metadata = metadata(config, &root)?;
-        let list = read_crate_list(metadata.file())?;
+        let metadata = metadata(config, root)?;
+        let list = read_crate_list(&metadata)?;
         let dst = metadata.parent().join("bin");
         check_overwrites(&dst, pkg, &opts.filter, &list, force)?;
     }
@@ -194,8 +196,8 @@ fn install_one(root: Filesystem,
             td.into_path();
         }
 
-        CargoError::from(format!("failed to compile `{}`, intermediate artifacts can be \
-                                  found at `{}`", pkg, ws.target_dir().display()))
+        format_err!("failed to compile `{}`, intermediate artifacts can be \
+                     found at `{}`", pkg, ws.target_dir().display())
     })?;
     let binaries: Vec<(&str, &Path)> = compile.binaries.iter().map(|bin| {
         let name = bin.file_name().unwrap();
@@ -210,8 +212,8 @@ fn install_one(root: Filesystem,
               features");
     }
 
-    let metadata = metadata(config, &root)?;
-    let mut list = read_crate_list(metadata.file())?;
+    let metadata = metadata(config, root)?;
+    let mut list = read_crate_list(&metadata)?;
     let dst = metadata.parent().join("bin");
     let duplicates = check_overwrites(&dst, pkg, &opts.filter,
                                            &list, force)?;
@@ -225,14 +227,12 @@ fn install_one(root: Filesystem,
     for &(bin, src) in binaries.iter() {
         let dst = staging_dir.path().join(bin);
         // Try to move if `target_dir` is transient.
-        if !source_id.is_path() {
-            if fs::rename(src, &dst).is_ok() {
-                continue
-            }
+        if !source_id.is_path() && fs::rename(src, &dst).is_ok() {
+            continue
         }
         fs::copy(src, &dst).chain_err(|| {
-            format!("failed to copy `{}` to `{}`", src.display(),
-                    dst.display())
+            format_err!("failed to copy `{}` to `{}`", src.display(),
+                        dst.display())
         })?;
     }
 
@@ -248,8 +248,8 @@ fn install_one(root: Filesystem,
         let dst = dst.join(bin);
         config.shell().status("Installing", dst.display())?;
         fs::rename(&src, &dst).chain_err(|| {
-            format!("failed to move `{}` to `{}`", src.display(),
-                    dst.display())
+            format_err!("failed to move `{}` to `{}`", src.display(),
+                        dst.display())
         })?;
         installed.bins.push(dst);
     }
@@ -264,8 +264,8 @@ fn install_one(root: Filesystem,
                 let dst = dst.join(bin);
                 config.shell().status("Replacing", dst.display())?;
                 fs::rename(&src, &dst).chain_err(|| {
-                    format!("failed to move `{}` to `{}`", src.display(),
-                            dst.display())
+                    format_err!("failed to move `{}` to `{}`", src.display(),
+                                dst.display())
                 })?;
                 replaced_names.push(bin);
             }
@@ -301,7 +301,7 @@ fn install_one(root: Filesystem,
                .extend(to_install.iter().map(|s| s.to_string()));
     }
 
-    let write_result = write_crate_list(metadata.file(), list);
+    let write_result = write_crate_list(&metadata, list);
     match write_result {
         // Replacement error (if any) isn't actually caused by write error
         // but this seems to be the only way to show both.
@@ -343,30 +343,31 @@ fn select_pkg<'a, T>(mut source: T,
                     // version range, otherwise parse it as a specific version
                     let first = v.chars()
                         .nth(0)
-                        .ok_or("no version provided for the `--vers` flag")?;
+                        .ok_or(format_err!("no version provided for the `--vers` flag"))?;
 
                     match first {
                         '<' | '>' | '=' | '^' | '~' => match v.parse::<VersionReq>() {
                             Ok(v) => Some(v.to_string()),
                             Err(_) => {
-                                let msg = format!("the `--vers` provided, `{}`, is \
-                                                   not a valid semver version requirement\n\n
-                                                   Please have a look at \
-                                                   http://doc.crates.io/specifying-dependencies.html \
-                                                   for the correct format", v);
-                                return Err(msg.into());
+                                bail!("the `--vers` provided, `{}`, is \
+                                       not a valid semver version requirement\n\n
+                                       Please have a look at \
+                                       http://doc.crates.io/specifying-dependencies.html \
+                                       for the correct format", v)
                             }
                         },
                         _ => match v.parse::<Version>() {
                             Ok(v) => Some(format!("={}", v)),
                             Err(_) => {
-                                let mut msg = format!("the `--vers` provided, `{}`, is \
-                                                       not a valid semver version\n\n\
-                                                       historically Cargo treated this \
-                                                       as a semver version requirement \
-                                                       accidentally\nand will continue \
-                                                       to do so, but this behavior \
-                                                       will be removed eventually", v);
+                                let mut msg = format!("\
+                                    the `--vers` provided, `{}`, is \
+                                    not a valid semver version\n\n\
+                                    historically Cargo treated this \
+                                    as a semver version requirement \
+                                    accidentally\nand will continue \
+                                    to do so, but this behavior \
+                                    will be removed eventually", v
+                                );
 
                                 // If it is not a valid version but it is a valid version
                                 // requirement, add a note to the warning
@@ -392,9 +393,9 @@ fn select_pkg<'a, T>(mut source: T,
                 }
                 None => {
                     let vers_info = vers.map(|v| format!(" with version `{}`", v))
-                                        .unwrap_or(String::new());
-                    Err(format!("could not find `{}` in `{}`{}", name,
-                                source.source_id(), vers_info).into())
+                                        .unwrap_or_default();
+                    Err(format_err!("could not find `{}` in {}{}", name,
+                                    source.source_id(), vers_info))
                 }
             }
         }
@@ -436,7 +437,7 @@ fn one<I, F>(mut i: I, f: F) -> CargoResult<Option<I::Item>>
         (Some(i1), Some(i2)) => {
             let mut v = vec![i1, i2];
             v.extend(i);
-            Err(f(v).into())
+            Err(format_err!("{}", f(v)))
         }
         (Some(i), None) => Ok(Some(i)),
         (None, _) => Ok(None)
@@ -448,13 +449,11 @@ fn check_overwrites(dst: &Path,
                     filter: &ops::CompileFilter,
                     prev: &CrateListingV1,
                     force: bool) -> CargoResult<BTreeMap<String, Option<PackageId>>> {
-    if !filter.is_specific() {
-        // If explicit --bin or --example flags were passed then those'll
-        // get checked during cargo_compile, we only care about the "build
-        // everything" case here
-        if pkg.targets().iter().filter(|t| t.is_bin()).next().is_none() {
-            bail!("specified package has no binaries")
-        }
+    // If explicit --bin or --example flags were passed then those'll
+    // get checked during cargo_compile, we only care about the "build
+    // everything" case here
+    if !filter.is_specific() && !pkg.targets().iter().any(|t| t.is_bin()) {
+        bail!("specified package has no binaries")
     }
     let duplicates = find_duplicates(dst, pkg, filter, prev);
     if force || duplicates.is_empty() {
@@ -462,7 +461,7 @@ fn check_overwrites(dst: &Path,
     }
     // Format the error message.
     let mut msg = String::new();
-    for (ref bin, p) in duplicates.iter() {
+    for (bin, p) in duplicates.iter() {
         msg.push_str(&format!("binary `{}` already exists in destination", bin));
         if let Some(p) = p.as_ref() {
             msg.push_str(&format!(" as part of `{}`\n", p));
@@ -471,7 +470,7 @@ fn check_overwrites(dst: &Path,
         }
     }
     msg.push_str("Add --force to overwrite");
-    Err(msg.into())
+    Err(format_err!("{}", msg))
 }
 
 fn find_duplicates(dst: &Path,
@@ -515,10 +514,10 @@ fn find_duplicates(dst: &Path,
     }
 }
 
-fn read_crate_list(mut file: &File) -> CargoResult<CrateListingV1> {
-    (|| -> CargoResult<_> {
+fn read_crate_list(file: &FileLock) -> CargoResult<CrateListingV1> {
+    let listing = (|| -> CargoResult<_> {
         let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
+        file.file().read_to_string(&mut contents)?;
         let listing = toml::from_str(&contents).chain_err(|| {
             internal("invalid TOML found for metadata")
         })?;
@@ -529,26 +528,31 @@ fn read_crate_list(mut file: &File) -> CargoResult<CrateListingV1> {
             }
         }
     })().chain_err(|| {
-        "failed to parse crate metadata"
-    })
+        format_err!("failed to parse crate metadata at `{}`",
+                    file.path().to_string_lossy())
+    })?;
+    Ok(listing)
 }
 
-fn write_crate_list(mut file: &File, listing: CrateListingV1) -> CargoResult<()> {
+fn write_crate_list(file: &FileLock, listing: CrateListingV1) -> CargoResult<()> {
     (|| -> CargoResult<_> {
+        let mut file = file.file();
         file.seek(SeekFrom::Start(0))?;
         file.set_len(0)?;
         let data = toml::to_string(&CrateListing::V1(listing))?;
         file.write_all(data.as_bytes())?;
         Ok(())
     })().chain_err(|| {
-        "failed to write crate metadata"
-    })
+        format_err!("failed to write crate metadata at `{}`",
+                    file.path().to_string_lossy())
+    })?;
+    Ok(())
 }
 
 pub fn install_list(dst: Option<&str>, config: &Config) -> CargoResult<()> {
     let dst = resolve_root(dst, config)?;
     let dst = metadata(config, &dst)?;
-    let list = read_crate_list(dst.file())?;
+    let list = read_crate_list(&dst)?;
     for (k, v) in list.v1.iter() {
         println!("{}:", k);
         for bin in v {
@@ -559,12 +563,59 @@ pub fn install_list(dst: Option<&str>, config: &Config) -> CargoResult<()> {
 }
 
 pub fn uninstall(root: Option<&str>,
-                 spec: &str,
+                 specs: Vec<&str>,
                  bins: &[String],
                  config: &Config) -> CargoResult<()> {
+    if specs.len() > 1 && bins.len() > 0 {
+        bail!("A binary can only be associated with a single installed package, specifying multiple specs with --bin is redundant.");
+    }
+
     let root = resolve_root(root, config)?;
+    let scheduled_error = if specs.len() == 1 {
+        uninstall_one(root, specs[0], bins, config)?;
+        false
+    } else {
+        let mut succeeded = vec![];
+        let mut failed = vec![];
+        for spec in specs {
+            let root = root.clone();
+            match uninstall_one(root, spec, bins, config) {
+                Ok(()) => succeeded.push(spec),
+                Err(e) => {
+                    ::handle_error(e, &mut config.shell());
+                    failed.push(spec)
+                }
+            }
+        }
+
+        let mut summary = vec![];
+        if !succeeded.is_empty() {
+            summary.push(format!("Successfully uninstalled {}!", succeeded.join(", ")));
+        }
+        if !failed.is_empty() {
+            summary.push(format!("Failed to uninstall {} (see error(s) above).", failed.join(", ")));
+        }
+
+        if !succeeded.is_empty() || !failed.is_empty() {
+            config.shell().status("Summary", summary.join(" "))?;
+        }
+
+        !failed.is_empty()
+    };
+
+    if scheduled_error {
+        bail!("some packages failed to uninstall");
+    }
+
+    Ok(())
+}
+
+pub fn uninstall_one(root: Filesystem,
+                     spec: &str,
+                     bins: &[String],
+                     config: &Config) -> CargoResult<()> {
     let crate_metadata = metadata(config, &root)?;
-    let mut metadata = read_crate_list(crate_metadata.file())?;
+    let mut metadata = read_crate_list(&crate_metadata)?;
     let mut to_remove = Vec::new();
     {
         let result = PackageIdSpec::query_str(spec, metadata.v1.keys())?
@@ -609,7 +660,7 @@ pub fn uninstall(root: Option<&str>,
             installed.remove();
         }
     }
-    write_crate_list(crate_metadata.file(), metadata)?;
+    write_crate_list(&crate_metadata, metadata)?;
     for bin in to_remove {
         config.shell().status("Removing", bin.display())?;
         fs::remove_file(bin)?;

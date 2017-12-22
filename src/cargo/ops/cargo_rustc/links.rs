@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 
-use core::PackageId;
+use core::{Resolve, PackageId};
 use util::CargoResult;
 use super::Unit;
 
@@ -17,7 +18,7 @@ impl<'a> Links<'a> {
         }
     }
 
-    pub fn validate(&mut self, unit: &Unit<'a>) -> CargoResult<()> {
+    pub fn validate(&mut self, resolve: &Resolve, unit: &Unit<'a>) -> CargoResult<()> {
         if !self.validated.insert(unit.pkg.package_id()) {
             return Ok(())
         }
@@ -27,17 +28,27 @@ impl<'a> Links<'a> {
         };
         if let Some(prev) = self.links.get(lib) {
             let pkg = unit.pkg.package_id();
-            if prev.name() == pkg.name() && prev.source_id() == pkg.source_id() {
-                bail!("native library `{}` is being linked to by more \
-                       than one version of the same package, but it can \
-                       only be linked once; try updating or pinning your \
-                       dependencies to ensure that this package only shows \
-                       up once\n\n  {}\n  {}", lib, prev, pkg)
-            } else {
-                bail!("native library `{}` is being linked to by more than \
-                       one package, and can only be linked to by one \
-                       package\n\n  {}\n  {}", lib, prev, pkg)
-            }
+
+            let describe_path = |pkgid: &PackageId| -> String {
+                let dep_path = resolve.path_to_top(pkgid);
+                let mut dep_path_desc = format!("package `{}`", dep_path[0]);
+                for dep in dep_path.iter().skip(1) {
+                    write!(dep_path_desc,
+                           "\n    ... which is depended on by `{}`",
+                           dep).unwrap();
+                }
+                dep_path_desc
+            };
+
+            bail!("multiple packages link to native library `{}`, \
+                   but a native library can be linked only once\n\
+                   \n\
+                   {}\nlinks to native library `{}`\n\
+                   \n\
+                   {}\nalso links to native library `{}`",
+                  lib,
+                  describe_path(prev), lib,
+                  describe_path(pkg), lib)
         }
         if !unit.pkg.manifest().targets().iter().any(|t| t.is_custom_build()) {
             bail!("package `{}` specifies that it links to `{}` but does not \

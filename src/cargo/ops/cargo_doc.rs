@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -22,31 +22,35 @@ pub fn doc(ws: &Workspace, options: &DocOptions) -> CargoResult<()> {
                                             &specs)?;
     let (packages, resolve_with_overrides) = resolve;
 
-    let mut pkgs = Vec::new();
-    if specs.len() > 0 {
-        for p in specs.iter() {
-            pkgs.push(packages.get(p.query(resolve_with_overrides.iter())?)?);
-        }
-    } else {
-        return Err(format!("manifest path `{}` contains no package: The manifest is virtual, \
-                     and the workspace has no members.", ws.current_manifest().display()).into());
+    if specs.is_empty() {
+        bail!("manifest path `{}` contains no package: The manifest is virtual, \
+               and the workspace has no members.",
+              ws.current_manifest().display())
     };
 
-    let mut lib_names = HashSet::new();
-    let mut bin_names = HashSet::new();
+    let pkgs = specs.iter().map(|p| {
+        let pkgid = p.query(resolve_with_overrides.iter())?;
+        packages.get(pkgid)
+    }).collect::<CargoResult<Vec<_>>>()?;
+
+    let mut lib_names = HashMap::new();
+    let mut bin_names = HashMap::new();
     for package in &pkgs {
         for target in package.targets().iter().filter(|t| t.documented()) {
             if target.is_lib() {
-                assert!(lib_names.insert(target.crate_name()));
+                if let Some(prev) = lib_names.insert(target.crate_name(), package) {
+                    bail!("The library `{}` is specified by packages `{}` and \
+                          `{}` but can only be documented once. Consider renaming \
+                          or marking one of the targets as `doc = false`.",
+                          target.crate_name(), prev, package);
+                }
             } else {
-                assert!(bin_names.insert(target.crate_name()));
-            }
-        }
-        for bin in bin_names.iter() {
-            if lib_names.contains(bin) {
-                bail!("cannot document a package where a library and a binary \
-                       have the same name. Consider renaming one or marking \
-                       the target as `doc = false`")
+                if let Some(prev) = bin_names.insert(target.crate_name(), package) {
+                    bail!("The binary `{}` is specified by packages `{}` and \
+                          `{}` but can be documented only once. Consider renaming \
+                          or marking one of the targets as `doc = false`.",
+                          target.crate_name(), prev, package);
+                }
             }
         }
     }
@@ -59,7 +63,7 @@ pub fn doc(ws: &Workspace, options: &DocOptions) -> CargoResult<()> {
         } else if pkgs.len() == 1 {
             pkgs[0].name().replace("-", "_")
         } else {
-            match lib_names.iter().chain(bin_names.iter()).nth(0) {
+            match lib_names.keys().chain(bin_names.keys()).nth(0) {
                 Some(s) => s.to_string(),
                 None => return Ok(()),
             }

@@ -86,7 +86,7 @@ processes spawned by Cargo, use the $RUSTFLAGS environment variable or the
 `build.rustflags` configuration option.
 ";
 
-pub fn execute(options: Options, config: &Config) -> CliResult {
+pub fn execute(options: Options, config: &mut Config) -> CliResult {
     debug!("executing; cmd=cargo-rustc; args={:?}",
            env::args().collect::<Vec<_>>());
     config.configure(options.flag_verbose,
@@ -102,10 +102,10 @@ pub fn execute(options: Options, config: &Config) -> CliResult {
         Some("dev") | None => CompileMode::Build,
         Some("test") => CompileMode::Test,
         Some("bench") => CompileMode::Bench,
-        Some("check") => CompileMode::Check,
+        Some("check") => CompileMode::Check {test: false},
         Some(mode) => {
-            let err = format!("unknown profile: `{}`, use dev,
-                                     test, or bench", mode).into();
+            let err = format_err!("unknown profile: `{}`, use dev,
+                                   test, or bench", mode);
             return Err(CliError::new(err, 101))
         }
     };

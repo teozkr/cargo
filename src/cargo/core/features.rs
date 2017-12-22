@@ -18,7 +18,7 @@
 //!    the `Manifest::feature_gate` function, but otherwise you may wish to
 //!    place the feature gate elsewhere in Cargo.
 //!
-//! 3. Do actually perform the feature gate, you'll want to have code that looks
+//! 3. To actually perform the feature gate, you'll want to have code that looks
 //!    like:
 //!
 //! ```rust,ignore
@@ -31,7 +31,7 @@
 //! })?;
 //! ```
 //!
-//! Notably you'll notice the `require` funciton called with your `Feature`, and
+//! Notably you'll notice the `require` function called with your `Feature`, and
 //! then you use `chain_err` to tack on more context for why the feature was
 //! required when the feature isn't activated.
 //!
@@ -124,6 +124,9 @@ features! {
         [unstable] test_dummy_unstable: bool,
 
         [unstable] always_optimize_deps: bool,
+
+        // Downloading packages from alternative registry indexes.
+        [unstable] alternative_registries: bool,
     }
 }
 
@@ -150,7 +153,7 @@ impl Features {
         };
 
         if *slot {
-            bail!("the cargo feature `{}` has already bene activated", feature);
+            bail!("the cargo feature `{}` has already been activated", feature);
         }
 
         match status {
@@ -202,7 +205,7 @@ impl Features {
     }
 }
 
-/// A parsed represetnation of all unstable flags that Cargo accepts.
+/// A parsed representation of all unstable flags that Cargo accepts.
 ///
 /// Cargo, like `rustc`, accepts a suite of `-Z` flags which are intended for
 /// gating unstable functionality to Cargo. These flags are only available on
@@ -230,11 +233,12 @@ impl Features {
 #[derive(Default, Debug)]
 pub struct CliUnstable {
     pub print_im_a_teapot: bool,
+    pub unstable_options: bool,
 }
 
 impl CliUnstable {
     pub fn parse(&mut self, flags: &[String]) -> CargoResult<()> {
-        if flags.len() > 0 && !nightly_features_allowed() {
+        if !flags.is_empty() && !nightly_features_allowed() {
             bail!("the `-Z` flag is only accepted on the nightly channel of Cargo")
         }
         for flag in flags {
@@ -259,6 +263,7 @@ impl CliUnstable {
 
         match k {
             "print-im-a-teapot" => self.print_im_a_teapot = parse_bool(v)?,
+            "unstable-options" => self.unstable_options = true,
             _ => bail!("unknown `-Z` flag specified: {}", k),
         }
 
@@ -269,7 +274,7 @@ impl CliUnstable {
 fn channel() -> String {
     env::var("__CARGO_TEST_CHANNEL_OVERRIDE_DO_NOT_USE_THIS").unwrap_or_else(|_| {
         ::version().cfg_info.map(|c| c.release_channel)
-            .unwrap_or(String::from("dev"))
+            .unwrap_or_else(|| String::from("dev"))
     })
 }
 

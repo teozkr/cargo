@@ -159,7 +159,7 @@
 //! ```
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::path::{PathBuf, Path};
@@ -175,9 +175,12 @@ use sources::PathSource;
 use util::{CargoResult, Config, internal, FileLock, Filesystem};
 use util::errors::CargoResultExt;
 use util::hex;
+use util::to_url::ToUrl;
 
 const INDEX_LOCK: &'static str = ".cargo-index-lock";
-pub static CRATES_IO: &'static str = "https://github.com/rust-lang/crates.io-index";
+pub const CRATES_IO: &'static str = "https://github.com/rust-lang/crates.io-index";
+const CRATE_TEMPLATE: &'static str = "{crate}";
+const VERSION_TEMPLATE: &'static str = "{version}";
 
 pub struct RegistrySource<'cfg> {
     source_id: SourceId,
@@ -191,14 +194,22 @@ pub struct RegistrySource<'cfg> {
 
 #[derive(Deserialize)]
 pub struct RegistryConfig {
-    /// Download endpoint for all crates. This will be appended with
-    /// `/<crate>/<version>/download` and then will be hit with an HTTP GET
-    /// request to download the tarball for a crate.
+    /// Download endpoint for all crates.
+    ///
+    /// The string is a template which will generate the download URL for the
+    /// tarball of a specific version of a crate. The substrings `{crate}` and
+    /// `{version}` will be replaced with the crate's name and version
+    /// respectively.
+    ///
+    /// For backwards compatibility, if the string does not contain `{crate}` or
+    /// `{version}`, it will be extended with `/{crate}/{version}/download` to
+    /// support registries like crates.io which were crated before the
+    /// templating setup was created.
     pub dl: String,
 
     /// API endpoint for the registry. This is what's actually hit to perform
     /// operations like yanks, owner modifications, publish new crates, etc.
-    pub api: String,
+    pub api: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -206,7 +217,7 @@ struct RegistryPackage<'a> {
     name: Cow<'a, str>,
     vers: Version,
     deps: DependencyList,
-    features: HashMap<String, Vec<String>>,
+    features: BTreeMap<String, Vec<String>>,
     cksum: String,
     yanked: Option<bool>,
 }
@@ -224,6 +235,7 @@ struct RegistryDependency<'a> {
     default_features: bool,
     target: Option<Cow<'a, str>>,
     kind: Option<Cow<'a, str>>,
+    registry: Option<String>,
 }
 
 pub trait RegistryData {
@@ -313,9 +325,33 @@ impl<'cfg> RegistrySource<'cfg> {
 
         let gz = GzDecoder::new(tarball.file())?;
         let mut tar = Archive::new(gz);
-        tar.unpack(dst.parent().unwrap())?;
+        let prefix = dst.file_name().unwrap();
+        let parent = dst.parent().unwrap();
+        for entry in tar.entries()? {
+            let mut entry = entry.chain_err(|| "failed to iterate over archive")?;
+            let entry_path = entry.path()
+                .chain_err(|| "failed to read entry path")?
+                .into_owned();
+
+            // We're going to unpack this tarball into the global source
+            // directory, but we want to make sure that it doesn't accidentally
+            // (or maliciously) overwrite source code from other crates. Cargo
+            // itself should never generate a tarball that hits this error, and
+            // crates.io should also block uploads with these sorts of tarballs,
+            // but be extra sure by adding a check here as well.
+            if !entry_path.starts_with(prefix) {
+                bail!("invalid tarball downloaded, contains \
+                       a file at {:?} which isn't under {:?}",
+                      entry_path, prefix)
+            }
+
+            // Once that's verified, unpack the entry as usual.
+            entry.unpack_in(parent).chain_err(|| {
+                format!("failed to unpack entry at `{}`", entry_path.display())
+            })?;
+        }
         File::create(&ok)?;
-        Ok(dst)
+        Ok(dst.clone())
     }
 
     fn do_update(&mut self) -> CargoResult<()> {
@@ -459,12 +495,18 @@ impl<'de> de::Deserialize<'de> for DependencyList {
 fn parse_registry_dependency(dep: RegistryDependency)
                              -> CargoResult<Dependency> {
     let RegistryDependency {
-        name, req, features, optional, default_features, target, kind
+        name, req, features, optional, default_features, target, kind, registry
     } = dep;
 
-    let mut dep = DEFAULT_ID.with(|id| {
-        Dependency::parse_no_deprecated(&name, Some(&req), id)
-    })?;
+    let id = if let Some(registry) = registry {
+        SourceId::for_registry(&registry.to_url()?)?
+    } else {
+        DEFAULT_ID.with(|id| {
+            id.clone()
+        })
+    };
+
+    let mut dep = Dependency::parse_no_deprecated(&name, Some(&req), &id)?;
     let kind = match kind.as_ref().map(|s| &s[..]).unwrap_or("") {
         "dev" => Kind::Development,
         "build" => Kind::Build,
@@ -488,5 +530,6 @@ fn parse_registry_dependency(dep: RegistryDependency)
        .set_features(features)
        .set_platform(platform)
        .set_kind(kind);
+
     Ok(dep)
 }

@@ -2,7 +2,7 @@ use std::ffi::{OsString, OsStr};
 
 use ops::{self, Compilation};
 use util::{self, CargoTestError, Test, ProcessError};
-use util::errors::{CargoResult, CargoErrorKind, CargoError};
+use util::errors::CargoResult;
 use core::Workspace;
 
 pub struct TestOptions<'a> {
@@ -42,11 +42,12 @@ pub fn run_tests(ws: &Workspace,
     }
 
     let (doctest, docerrors) = run_doc_tests(options, test_args, &compilation)?;
+    let test = if docerrors.is_empty() { test } else { doctest };
     errors.extend(docerrors);
     if errors.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(CargoTestError::new(doctest, errors)))
+        Ok(Some(CargoTestError::new(test, errors)))
     }
 }
 
@@ -104,20 +105,23 @@ fn run_unit_tests(options: &TestOptions,
         let result = cmd.exec();
 
         match result {
-            Err(CargoError(CargoErrorKind::ProcessErrorKind(e), .. )) => {
-                 errors.push(e);
-                if !options.no_fail_fast {
-                    return Ok((Test::UnitTest(kind.clone(), test.clone()), errors))
-                }
-            }
             Err(e) => {
-                //This is an unexpected Cargo error rather than a test failure
-                return Err(e)
+                let e = e.downcast::<ProcessError>()?;
+                errors.push((kind.clone(), test.clone(), e));
+                if !options.no_fail_fast {
+                    break;
+                }
             }
             Ok(()) => {}
         }
     }
-    Ok((Test::Multiple, errors))
+
+    if errors.len() == 1 {
+        let (kind, test, e) = errors.pop().unwrap();
+        Ok((Test::UnitTest(kind, test), vec![e]))
+    } else {
+        Ok((Test::Multiple, errors.into_iter().map((|(_, _, e)| e)).collect()))
+    }
 }
 
 fn run_doc_tests(options: &TestOptions,
@@ -192,10 +196,15 @@ fn run_doc_tests(options: &TestOptions,
                 p.arg("--extern").arg(&arg);
             }
 
+            if let Some(flags) = compilation.rustdocflags.get(package.package_id()) {
+                p.args(flags);
+            }
+
             config.shell().verbose(|shell| {
                 shell.status("Running", p.to_string())
             })?;
-            if let Err(CargoError(CargoErrorKind::ProcessErrorKind(e), .. )) = p.exec() {
+            if let Err(e) = p.exec() {
+                let e = e.downcast::<ProcessError>()?;
                 errors.push(e);
                 if !options.no_fail_fast {
                     return Ok((Test::Doc, errors));

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
+use termcolor::Color::{self, Cyan, Green, Red};
+
 use core::PackageId;
 use core::registry::PackageRegistry;
 use core::{Resolve, SourceId, Workspace};
@@ -83,8 +85,8 @@ pub fn update_lockfile(ws: &Workspace, opts: &UpdateOptions)
                                                   true)?;
 
     // Summarize what is changing for the user.
-    let print_change = |status: &str, msg: String| {
-        opts.config.shell().status(status, msg)
+    let print_change = |status: &str, msg: String, color: Color| {
+        opts.config.shell().status_with_color(status, msg, color)
     };
     for (removed, added) in compare_dependency_graphs(&previous_resolve, &resolve) {
         if removed.len() == 1 && added.len() == 1 {
@@ -94,18 +96,18 @@ pub fn update_lockfile(ws: &Workspace, opts: &UpdateOptions)
             } else {
                 format!("{} -> v{}", removed[0], added[0].version())
             };
-            print_change("Updating", msg)?;
+            print_change("Updating", msg, Green)?;
         } else {
             for package in removed.iter() {
-                print_change("Removing", format!("{}", package))?;
+                print_change("Removing", format!("{}", package), Red)?;
             }
             for package in added.iter() {
-                print_change("Adding", format!("{}", package))?;
+                print_change("Adding", format!("{}", package), Cyan)?;
             }
         }
     }
 
-    ops::write_pkg_lockfile(&ws, &resolve)?;
+    ops::write_pkg_lockfile(ws, &resolve)?;
     return Ok(());
 
     fn fill_with_deps<'a>(resolve: &'a Resolve, dep: &'a PackageId,
@@ -168,7 +170,7 @@ pub fn update_lockfile(ws: &Workspace, opts: &UpdateOptions)
             changes.entry(key(dep)).or_insert(empty.clone()).1.push(dep);
         }
 
-        for (_, v) in changes.iter_mut() {
+        for v in changes.values_mut() {
             let (ref mut old, ref mut new) = *v;
             old.sort();
             new.sort();

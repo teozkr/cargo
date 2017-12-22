@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::fmt;
 use std::path::{PathBuf, Path};
 use std::rc::Rc;
+use std::hash::{Hash, Hasher};
 
 use semver::Version;
 use serde::ser;
@@ -29,7 +30,7 @@ pub struct Manifest {
     include: Vec<String>,
     metadata: ManifestMetadata,
     profiles: Profiles,
-    publish: bool,
+    publish: Option<Vec<String>>,
     replace: Vec<(PackageIdSpec, Dependency)>,
     patch: HashMap<Url, Vec<Dependency>>,
     workspace: WorkspaceConfig,
@@ -76,7 +77,7 @@ pub struct ManifestMetadata {
     pub homepage: Option<String>,       // url
     pub repository: Option<String>,     // url
     pub documentation: Option<String>,  // url
-    pub badges: HashMap<String, HashMap<String, String>>,
+    pub badges: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -177,6 +178,8 @@ pub struct Profile {
     pub check: bool,
     #[serde(skip_serializing)]
     pub panic: Option<String>,
+    #[serde(skip_serializing)]
+    pub incremental: bool,
 }
 
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
@@ -190,6 +193,7 @@ pub struct Profiles {
     pub doc: Profile,
     pub custom_build: Profile,
     pub check: Profile,
+    pub check_test: Profile,
     pub doctest: Profile,
     pub deps_profile: Option<Profile>,
 }
@@ -200,7 +204,11 @@ pub struct Profiles {
 pub struct Target {
     kind: TargetKind,
     name: String,
-    src_path: PathBuf,
+    // Note that the `src_path` here is excluded from the `Hash` implementation
+    // as it's absolute currently and is otherwise a little too brittle for
+    // causing rebuilds. Instead the hash for the path that we send to the
+    // compiler is handled elsewhere.
+    src_path: NonHashedPathBuf,
     required_features: Option<Vec<String>>,
     tested: bool,
     benched: bool,
@@ -208,6 +216,17 @@ pub struct Target {
     doctest: bool,
     harness: bool, // whether to use the test harness (--test)
     for_host: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct NonHashedPathBuf {
+    path: PathBuf,
+}
+
+impl Hash for NonHashedPathBuf {
+    fn hash<H: Hasher>(&self, _: &mut H) {
+        // ...
+    }
 }
 
 #[derive(Serialize)]
@@ -228,7 +247,7 @@ impl ser::Serialize for Target {
             kind: &self.kind,
             crate_types: self.rustc_crate_types(),
             name: &self.name,
-            src_path: &self.src_path,
+            src_path: &self.src_path.path,
         }.serialize(s)
     }
 }
@@ -241,7 +260,7 @@ impl Manifest {
                links: Option<String>,
                metadata: ManifestMetadata,
                profiles: Profiles,
-               publish: bool,
+               publish: Option<Vec<String>>,
                replace: Vec<(PackageIdSpec, Dependency)>,
                patch: HashMap<Url, Vec<Dependency>>,
                workspace: WorkspaceConfig,
@@ -280,7 +299,7 @@ impl Manifest {
     pub fn version(&self) -> &Version { self.package_id().version() }
     pub fn warnings(&self) -> &[DelayedWarning] { &self.warnings }
     pub fn profiles(&self) -> &Profiles { &self.profiles }
-    pub fn publish(&self) -> bool { self.publish }
+    pub fn publish(&self) -> &Option<Vec<String>> { &self.publish }
     pub fn replace(&self) -> &[(PackageIdSpec, Dependency)] { &self.replace }
     pub fn original(&self) -> &TomlManifest { &self.original }
     pub fn patch(&self) -> &HashMap<Url, Vec<Dependency>> { &self.patch }
@@ -322,8 +341,8 @@ impl Manifest {
     pub fn feature_gate(&self) -> CargoResult<()> {
         if self.im_a_teapot.is_some() {
             self.features.require(Feature::test_dummy_unstable()).chain_err(|| {
-                "the `im-a-teapot` manifest key is unstable and may not work \
-                 properly in England"
+                format_err!("the `im-a-teapot` manifest key is unstable and may \
+                             not work properly in England")
             })?;
         }
         if self.always_optimize_deps.is_some() {
@@ -382,7 +401,7 @@ impl Target {
         Target {
             kind: TargetKind::Bin,
             name: String::new(),
-            src_path: src_path,
+            src_path: NonHashedPathBuf { path: src_path },
             required_features: None,
             doc: false,
             doctest: false,
@@ -471,7 +490,7 @@ impl Target {
 
     pub fn name(&self) -> &str { &self.name }
     pub fn crate_name(&self) -> String { self.name.replace("-", "_") }
-    pub fn src_path(&self) -> &Path { &self.src_path }
+    pub fn src_path(&self) -> &Path { &self.src_path.path }
     pub fn required_features(&self) -> Option<&Vec<String>> { self.required_features.as_ref() }
     pub fn kind(&self) -> &TargetKind { &self.kind }
     pub fn tested(&self) -> bool { self.tested }
@@ -483,11 +502,11 @@ impl Target {
     pub fn doctested(&self) -> bool {
         self.doctest && match self.kind {
             TargetKind::Lib(ref kinds) => {
-                kinds.iter().find(|k| {
-                  *k == &LibKind::Rlib ||
-                  *k == &LibKind::Lib ||
-                  *k == &LibKind::ProcMacro
-                }).is_some()
+                kinds.iter().any(|k| {
+                  *k == LibKind::Rlib ||
+                  *k == LibKind::Lib ||
+                  *k == LibKind::ProcMacro
+                })
             }
             _ => false,
         }
@@ -627,6 +646,7 @@ impl Profile {
             debuginfo: Some(2),
             debug_assertions: true,
             overflow_checks: true,
+            incremental: true,
             ..Profile::default()
         }
     }
@@ -674,6 +694,14 @@ impl Profile {
         }
     }
 
+    pub fn default_check_test() -> Profile {
+        Profile {
+            check: true,
+            test: true,
+            ..Profile::default_dev()
+        }
+    }
+
     pub fn default_doctest() -> Profile {
         Profile {
             doc: true,
@@ -700,6 +728,7 @@ impl Default for Profile {
             run_custom_build: false,
             check: false,
             panic: None,
+            incremental: false,
         }
     }
 }

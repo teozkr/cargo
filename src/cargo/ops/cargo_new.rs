@@ -13,7 +13,7 @@ use core::Workspace;
 use ops::is_bad_artifact_name;
 use util::{GitRepo, HgRepo, PijulRepo, FossilRepo, internal};
 use util::{Config, paths};
-use util::errors::{CargoError, CargoResult, CargoResultExt};
+use util::errors::{CargoResult, CargoResultExt};
 
 use toml;
 
@@ -101,8 +101,8 @@ fn get_name<'a>(path: &'a Path, opts: &'a NewOptions, config: &Config) -> CargoR
     }
 
     let dir_name = path.file_name().and_then(|s| s.to_str()).ok_or_else(|| {
-        CargoError::from(format!("cannot create a project with a non-unicode name: {:?}",
-                                 path.file_name().unwrap()))
+        format_err!("cannot create a project with a non-unicode name: {:?}",
+                    path.file_name().unwrap())
     })?;
 
     if opts.bin {
@@ -237,10 +237,10 @@ cannot automatically generate Cargo.toml as the main target would be ambiguous",
             duplicates_checker.insert(i.target_name.as_ref(), i);
         } else {
             if let Some(plp) = previous_lib_relpath {
-                return Err(format!("cannot have a project with \
-                                    multiple libraries, \
-                                    found both `{}` and `{}`",
-                                   plp, i.relative_path).into());
+                bail!("cannot have a project with \
+                       multiple libraries, \
+                       found both `{}` and `{}`",
+                      plp, i.relative_path)
             }
             previous_lib_relpath = Some(&i.relative_path);
         }
@@ -265,7 +265,7 @@ fn plan_new_source_file(bin: bool, project_name: String) -> SourceFileInformatio
     }
 }
 
-pub fn new(opts: NewOptions, config: &Config) -> CargoResult<()> {
+pub fn new(opts: &NewOptions, config: &Config) -> CargoResult<()> {
     let path = config.cwd().join(opts.path);
     if fs::metadata(&path).is_ok() {
         bail!("destination `{}` already exists\n\n\
@@ -278,7 +278,7 @@ pub fn new(opts: NewOptions, config: &Config) -> CargoResult<()> {
         bail!("can't specify both lib and binary outputs")
     }
 
-    let name = get_name(&path, &opts, config)?;
+    let name = get_name(&path, opts, config)?;
     check_name(name, opts.bin)?;
 
     let mkopts = MkOptions {
@@ -290,12 +290,13 @@ pub fn new(opts: NewOptions, config: &Config) -> CargoResult<()> {
     };
 
     mk(config, &mkopts).chain_err(|| {
-        format!("Failed to create project `{}` at `{}`",
-                name, path.display())
-    })
+        format_err!("Failed to create project `{}` at `{}`",
+                    name, path.display())
+    })?;
+    Ok(())
 }
 
-pub fn init(opts: NewOptions, config: &Config) -> CargoResult<()> {
+pub fn init(opts: &NewOptions, config: &Config) -> CargoResult<()> {
     let path = config.cwd().join(opts.path);
 
     let cargotoml_path = path.join("Cargo.toml");
@@ -307,14 +308,14 @@ pub fn init(opts: NewOptions, config: &Config) -> CargoResult<()> {
         bail!("can't specify both lib and binary outputs");
     }
 
-    let name = get_name(&path, &opts, config)?;
+    let name = get_name(&path, opts, config)?;
     check_name(name, opts.bin)?;
 
     let mut src_paths_types = vec![];
 
     detect_source_paths_and_types(&path, name, &mut src_paths_types)?;
 
-    if src_paths_types.len() == 0 {
+    if src_paths_types.is_empty() {
         src_paths_types.push(plan_new_source_file(opts.bin, name.to_string()));
     } else {
         // --bin option may be ignored if lib.rs or src/lib.rs present
@@ -365,9 +366,10 @@ pub fn init(opts: NewOptions, config: &Config) -> CargoResult<()> {
     };
 
     mk(config, &mkopts).chain_err(|| {
-        format!("Failed to create project `{}` at `{}`",
-                 name, path.display())
-    })
+        format_err!("Failed to create project `{}` at `{}`",
+                    name, path.display())
+    })?;
+    Ok(())
 }
 
 fn strip_rust_affixes(name: &str) -> &str {
@@ -393,23 +395,27 @@ fn mk(config: &Config, opts: &MkOptions) -> CargoResult<()> {
     let name = opts.name;
     let cfg = global_config(config)?;
     // Please ensure that ignore and hgignore are in sync.
-    let ignore = ["/target/\n", "**/*.rs.bk\n",
+    let ignore = ["\n", "/target/\n", "**/*.rs.bk\n",
         if !opts.bin { "Cargo.lock\n" } else { "" }]
         .concat();
     // Mercurial glob ignores can't be rooted, so just sticking a 'syntax: glob' at the top of the
     // file will exclude too much. Instead, use regexp-based ignores. See 'hg help ignore' for
     // more.
-    let hgignore = ["^target/\n", "glob:*.rs.bk\n",
+    let hgignore = ["\n", "^target/\n", "glob:*.rs.bk\n",
         if !opts.bin { "glob:Cargo.lock\n" } else { "" }]
         .concat();
 
-    let in_existing_vcs_repo = existing_vcs_repo(path.parent().unwrap_or(path), config.cwd());
-    let vcs = match (opts.version_control, cfg.version_control, in_existing_vcs_repo) {
-        (None, None, false) => VersionControl::Git,
-        (None, Some(option), false) => option,
-        (Some(option), _, _) => option,
-        (_, _, true) => VersionControl::NoVcs,
-    };
+    let vcs = opts.version_control
+              .unwrap_or_else(|| {
+                  let in_existing_vcs = existing_vcs_repo(path.parent().unwrap_or(path),
+                                                          config.cwd());
+                  match (cfg.version_control, in_existing_vcs) {
+                      (None, false) => VersionControl::Git,
+                      (Some(opt), false) => opt,
+                      (_, true) => VersionControl::NoVcs,
+                  }
+              });
+
     match vcs {
         VersionControl::Git => {
             if !fs::metadata(&path.join(".git")).is_ok() {
@@ -427,6 +433,7 @@ fn mk(config: &Config, opts: &MkOptions) -> CargoResult<()> {
             if !fs::metadata(&path.join(".pijul")).is_ok() {
                 PijulRepo::init(path, config.cwd())?;
             }
+            paths::append(&path.join(".ignore"), ignore.as_bytes())?;
         },
         VersionControl::Fossil => {
             if !fs::metadata(&path.join(".fossil")).is_ok() {
@@ -462,14 +469,12 @@ name = "{}"
 path = {}
 "#, i.target_name, toml::Value::String(i.relative_path.clone())));
             }
-        } else {
-            if i.relative_path != "src/lib.rs" {
-                cargotoml_path_specifier.push_str(&format!(r#"
+        } else if i.relative_path != "src/lib.rs" {
+            cargotoml_path_specifier.push_str(&format!(r#"
 [lib]
 name = "{}"
 path = {}
 "#, i.target_name, toml::Value::String(i.relative_path.clone())));
-            }
         }
     }
 

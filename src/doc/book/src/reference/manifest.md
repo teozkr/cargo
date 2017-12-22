@@ -155,6 +155,7 @@ repository = "..."
 
 # This points to a file under the package root (relative to this `Cargo.toml`).
 # The contents of this file are stored and indexed in the registry.
+# crates.io will render this file and place the result on the crate's page.
 readme = "..."
 
 # This is a list of up to five keywords that describe this crate. Keywords
@@ -178,12 +179,18 @@ license = "..."
 # (similar to the readme key).
 license-file = "..."
 
-# Optional specification of badges to be displayed on crates.io. The badges
-# pertaining to build status that are currently available are Appveyor, CircleCI,
-# GitLab, and TravisCI. Available badges pertaining to code test coverage are
-# Codecov and Coveralls. There are also maintenance-related badges which state
-# the issue resolution time, percent of open issues, and future maintenance
-# intentions.
+# Optional specification of badges to be displayed on crates.io.
+#
+# - The badges pertaining to build status that are currently available are
+#   Appveyor, CircleCI, GitLab, and TravisCI.
+# - Available badges pertaining to code test coverage are Codecov and
+#   Coveralls.
+# - There are also maintenance-related badges basesed on isitmaintained.com
+#   which state the issue resolution time, percent of open issues, and future
+#   maintenance intentions.
+#
+# If a `repository` key is required, this refers to a repository in
+# `user/repo` format.
 [badges]
 
 # Appveyor: `repository` is required. `branch` is optional; default is `master`
@@ -191,7 +198,7 @@ license-file = "..."
 # `gitlab`.
 appveyor = { repository = "...", branch = "master", service = "github" }
 
-# Circle CI: `repository` is required. `branch` is optiona; default is `master`
+# Circle CI: `repository` is required. `branch` is optional; default is `master`
 circle-ci = { repository = "...", branch = "master" }
 
 # GitLab: `repository` is required. `branch` is optional; default is `master`
@@ -304,7 +311,7 @@ debug-assertions = true
 codegen-units = 1
 panic = 'unwind'
 
-# The benchmarking profile, used for `cargo bench`.
+# The benchmarking profile, used for `cargo bench` and `cargo test --release`.
 [profile.bench]
 opt-level = 3
 debug = false
@@ -727,8 +734,8 @@ source's original crate is replaced.
 
 More information about overriding dependencies can be found in the [overriding
 dependencies][replace] section of the documentation and [RFC 1969] for the
-technical specification of this feature. Note that the `[patch]` feature will
-first become available in Rust 1.20, set to be released on 2017-08-31.
+technical specification of this feature. (Note that the `[patch]` feature will
+first become available in Rust 1.21, set to be released on 2017-10-12.)
 
 [RFC 1969]: https://github.com/rust-lang/rfcs/pull/1969
 [replace]: reference/specifying-dependencies.html#overriding-dependencies

@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use ops::{self, Packages};
-use util::{self, CargoResult, CargoError, ProcessError};
-use util::errors::CargoErrorKind;
+use util::{self, CargoResult, ProcessError};
 use core::Workspace;
 
 pub fn run(ws: &Workspace,
@@ -11,39 +10,42 @@ pub fn run(ws: &Workspace,
     let config = ws.config();
 
     let pkg = match options.spec {
-        Packages::All => unreachable!("cargo run supports single package only"),
+        Packages::All |
+        Packages::Default |
         Packages::OptOut(_) => unreachable!("cargo run supports single package only"),
         Packages::Packages(xs) => match xs.len() {
             0 => ws.current()?,
             1 => ws.members()
                 .find(|pkg| pkg.name() == xs[0])
-                .ok_or_else(|| 
-                    CargoError::from(
-                        format!("package `{}` is not a member of the workspace", xs[0]))
+                .ok_or_else(||
+                    format_err!("package `{}` is not a member of the workspace", xs[0])
                 )?,
             _ => unreachable!("cargo run supports single package only"),
         }
     };
 
-    let mut bins = pkg.manifest().targets().iter().filter(|a| {
+    let bins: Vec<_> = pkg.manifest().targets().iter().filter(|a| {
         !a.is_lib() && !a.is_custom_build() && if !options.filter.is_specific() {
             a.is_bin()
         } else {
             options.filter.matches(a)
         }
-    });
-    if bins.next().is_none() {
+    })
+    .map(|bin| bin.name())
+    .collect();
+
+    if bins.len() == 0 {
         if !options.filter.is_specific() {
             bail!("a bin target must be available for `cargo run`")
         } else {
             // this will be verified in cargo_compile
         }
     }
-    if bins.next().is_some() {
+    if bins.len() > 1 {
         if !options.filter.is_specific() {
             bail!("`cargo run` requires that a project only have one \
                    executable; use the `--bin` option to specify which one \
-                   to run")
+                   to run\navailable binaries: {}", bins.join(", "))
         } else {
             bail!("`cargo run` can run at most one executable, but \
                    multiple were specified")
@@ -53,13 +55,13 @@ pub fn run(ws: &Workspace,
     let compile = ops::compile(ws, options)?;
     assert_eq!(compile.binaries.len(), 1);
     let exe = &compile.binaries[0];
-    let exe = match util::without_prefix(&exe, config.cwd()) {
+    let exe = match util::without_prefix(exe, config.cwd()) {
         Some(path) if path.file_name() == Some(path.as_os_str())
                    => Path::new(".").join(path).to_path_buf(),
         Some(path) => path.to_path_buf(),
         None => exe.to_path_buf(),
     };
-    let mut process = compile.target_process(exe, &pkg)?;
+    let mut process = compile.target_process(exe, pkg)?;
     process.args(args).cwd(config.cwd());
 
     config.shell().status("Running", process.to_string())?;
@@ -68,7 +70,9 @@ pub fn run(ws: &Workspace,
 
     match result {
         Ok(()) => Ok(None),
-        Err(CargoError(CargoErrorKind::ProcessErrorKind(e), ..)) => Ok(Some(e)),
-        Err(e) => Err(e)
+        Err(e) => {
+            let err = e.downcast::<ProcessError>()?;
+            Ok(Some(err))
+        }
     }
 }

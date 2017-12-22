@@ -33,7 +33,6 @@ use core::resolver::Resolve;
 use ops::{self, BuildOutput, Executor, DefaultExecutor};
 use util::config::Config;
 use util::{CargoResult, profile};
-use util::errors::{CargoResultExt, CargoError};
 
 /// Contains information about how a package should be compiled.
 #[derive(Debug)]
@@ -92,7 +91,7 @@ impl<'a> CompileOptions<'a> {
 pub enum CompileMode {
     Test,
     Build,
-    Check,
+    Check { test: bool },
     Bench,
     Doc { deps: bool },
     Doctest,
@@ -106,26 +105,23 @@ pub enum MessageFormat {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Packages<'a> {
+    Default,
     All,
     OptOut(&'a [String]),
     Packages(&'a [String]),
 }
 
 impl<'a> Packages<'a> {
-    pub fn from_flags(virtual_ws: bool, all: bool, exclude: &'a Vec<String>, package: &'a Vec<String>)
+    pub fn from_flags(all: bool, exclude: &'a [String], package: &'a [String])
                       -> CargoResult<Self>
     {
-        let all = all || (virtual_ws && package.is_empty());
-
-        let packages = match (all, &exclude) {
-            (true, exclude) if exclude.is_empty() => Packages::All,
-            (true, exclude) => Packages::OptOut(exclude),
-            (false, exclude) if !exclude.is_empty() => bail!("--exclude can only be used together \
-                                                           with --all"),
-            _ => Packages::Packages(package),
-        };
-
-        Ok(packages)
+        Ok(match (all, exclude.len(), package.len()) {
+            (false, 0, 0) => Packages::Default,
+            (false, 0, _) => Packages::Packages(package),
+            (false, _, _) => bail!("--exclude can only be used together with --all"),
+            (true, 0, _) => Packages::All,
+            (true, _, _) => Packages::OptOut(exclude),
+        })
     }
 
     pub fn into_package_id_specs(self, ws: &Workspace) -> CargoResult<Vec<PackageIdSpec>> {
@@ -150,7 +146,13 @@ impl<'a> Packages<'a> {
                     .into_iter().collect()
             }
             Packages::Packages(packages) => {
-                packages.iter().map(|p| PackageIdSpec::parse(&p)).collect::<CargoResult<Vec<_>>>()?
+                packages.iter().map(|p| PackageIdSpec::parse(p)).collect::<CargoResult<Vec<_>>>()?
+            }
+            Packages::Default => {
+                ws.default_members()
+                    .map(Package::package_id)
+                    .map(PackageIdSpec::from_package_id)
+                    .collect()
             }
         };
         Ok(specs)
@@ -170,6 +172,7 @@ pub enum CompileFilter<'a> {
         required_features_filterable: bool,
     },
     Only {
+        all_targets: bool,
         lib: bool,
         bins: FilterRule<'a>,
         examples: FilterRule<'a>,
@@ -190,10 +193,10 @@ pub fn compile_with_exec<'a>(ws: &Workspace<'a>,
     for member in ws.members() {
         for warning in member.manifest().warnings().iter() {
             if warning.is_critical {
-                let err: CargoResult<_> = Err(CargoError::from(warning.message.to_owned()));
-                return err.chain_err(|| {
-                    format!("failed to parse manifest at `{}`", member.manifest_path().display())
-                });
+                let err = format_err!("{}", warning.message);
+                let cx = format_err!("failed to parse manifest at `{}`",
+                                     member.manifest_path().display());
+                return Err(err.context(cx).into())
             } else {
                 options.config.shell().warn(&warning.message)?
             }
@@ -233,22 +236,18 @@ pub fn compile_ws<'a>(ws: &Workspace<'a>,
                                             &specs)?;
     let (packages, resolve_with_overrides) = resolve;
 
-    let mut pkgids = Vec::new();
-    if specs.len() > 0 {
-        for p in specs.iter() {
-            pkgids.push(p.query(resolve_with_overrides.iter())?);
-        }
-    } else {
-        return Err(format!("manifest path `{}` contains no package: The manifest is virtual, \
-                     and the workspace has no members.", ws.current_manifest().display()).into());
-    };
-
-    let to_builds = pkgids.iter().map(|id| {
-        packages.get(id)
-    }).collect::<CargoResult<Vec<_>>>()?;
-    for p in to_builds.iter() {
-        p.manifest().print_teapot(ws.config());
+    if specs.is_empty() {
+        bail!("manifest path `{}` contains no package: The manifest is virtual, \
+               and the workspace has no members.",
+              ws.current_manifest().display())
     }
+
+    let to_builds = specs.iter().map(|p| {
+        let pkgid = p.query(resolve_with_overrides.iter())?;
+        let p = packages.get(pkgid)?;
+        p.manifest().print_teapot(ws.config());
+        Ok(p)
+    }).collect::<CargoResult<Vec<_>>>()?;
 
     let mut general_targets = Vec::new();
     let mut package_targets = Vec::new();
@@ -327,7 +326,7 @@ pub fn compile_ws<'a>(ws: &Workspace<'a>,
                              exec)?
     };
 
-    ret.to_doc_test = to_builds.iter().map(|&p| p.clone()).collect();
+    ret.to_doc_test = to_builds.into_iter().cloned().collect();
 
     return Ok(ret);
 
@@ -377,7 +376,7 @@ impl<'a> FilterRule<'a> {
     pub fn try_collect(&self) -> Option<Vec<String>> {
         match *self {
             FilterRule::All => None,
-            FilterRule::Just(targets) => Some(targets.iter().map(|t| t.clone()).collect()),
+            FilterRule::Just(targets) => Some(targets.to_vec()),
         }
     }
 }
@@ -396,19 +395,17 @@ impl<'a> CompileFilter<'a> {
 
         if all_targets {
             CompileFilter::Only {
-                lib: true,
-                bins: FilterRule::All,
-                examples: FilterRule::All,
-                benches: FilterRule::All,
+                all_targets: true,
+                lib: true, bins: FilterRule::All,
+                examples: FilterRule::All, benches: FilterRule::All,
                 tests: FilterRule::All,
             }
         } else if lib_only || rule_bins.is_specific() || rule_tsts.is_specific()
             || rule_exms.is_specific() || rule_bens.is_specific() {
             CompileFilter::Only {
-                lib: lib_only,
-                bins: rule_bins,
-                examples: rule_exms,
-                benches: rule_bens,
+                all_targets: false,
+                lib: lib_only, bins: rule_bins,
+                examples: rule_exms, benches: rule_bens,
                 tests: rule_tsts,
             }
         } else {
@@ -421,7 +418,7 @@ impl<'a> CompileFilter<'a> {
     pub fn matches(&self, target: &Target) -> bool {
         match *self {
             CompileFilter::Default { .. } => true,
-            CompileFilter::Only { lib, bins, examples, tests, benches } => {
+            CompileFilter::Only { lib, bins, examples, tests, benches, .. } => {
                 let rule = match *target.kind() {
                     TargetKind::Bin => bins,
                     TargetKind::Test => tests,
@@ -489,7 +486,7 @@ fn generate_auto_targets<'a>(mode: CompileMode, targets: &'a [Target],
             }
             base
         }
-        CompileMode::Build | CompileMode::Check => {
+        CompileMode::Build | CompileMode::Check{..} => {
             targets.iter().filter(|t| {
                 t.is_bin() || t.is_lib()
             }).map(|t| BuildProposal {
@@ -500,7 +497,10 @@ fn generate_auto_targets<'a>(mode: CompileMode, targets: &'a [Target],
         }
         CompileMode::Doc { .. } => {
             targets.iter().filter(|t| {
-                t.documented()
+                t.documented() && (
+                    !t.is_bin() ||
+                    !targets.iter().any(|l| l.is_lib() && l.name() == t.name())
+                )
             }).map(|t| BuildProposal {
                 target: t,
                 profile: profile,
@@ -538,7 +538,7 @@ fn propose_indicated_targets<'a>(pkg: &'a Package,
                     required: false,
                 }
             });
-            return Ok(result.collect());
+            Ok(result.collect())
         }
         FilterRule::Just(names) => {
             let mut targets = Vec::new();
@@ -567,7 +567,7 @@ fn propose_indicated_targets<'a>(pkg: &'a Package,
                     required: true,
                 });
             }
-            return Ok(targets);
+            Ok(targets)
         }
     }
 }
@@ -614,9 +614,26 @@ fn generate_targets<'a>(pkg: &'a Package,
         CompileMode::Test => test,
         CompileMode::Bench => &profiles.bench,
         CompileMode::Build => build,
-        CompileMode::Check => &profiles.check,
+        CompileMode::Check {test: false} => &profiles.check,
+        CompileMode::Check {test: true} => &profiles.check_test,
         CompileMode::Doc { .. } => &profiles.doc,
         CompileMode::Doctest => &profiles.doctest,
+    };
+
+    let test_profile = if profile.check {
+        &profiles.check_test
+    } else if mode == CompileMode::Build {
+        test
+    } else {
+        profile
+    };
+
+    let bench_profile = if profile.check {
+        &profiles.check_test
+    } else if mode == CompileMode::Build {
+        &profiles.bench
+    } else {
+        profile
     };
 
     let targets = match *filter {
@@ -628,7 +645,7 @@ fn generate_targets<'a>(pkg: &'a Package,
             };
             generate_auto_targets(mode, pkg.targets(), profile, deps, required_features_filterable)
         }
-        CompileFilter::Only { lib, bins, examples, tests, benches } => {
+        CompileFilter::Only { all_targets, lib, bins, examples, tests, benches } => {
             let mut targets = Vec::new();
 
             if lib {
@@ -638,19 +655,30 @@ fn generate_targets<'a>(pkg: &'a Package,
                         profile: profile,
                         required: true,
                     });
-                } else {
+                } else if !all_targets {
                     bail!("no library targets found")
                 }
             }
-
             targets.append(&mut propose_indicated_targets(
                 pkg, bins, "bin", Target::is_bin, profile)?);
             targets.append(&mut propose_indicated_targets(
-                pkg, examples, "example", Target::is_example, build)?);
+                pkg, examples, "example", Target::is_example, profile)?);
+            // If --tests was specified, add all targets that would be
+            // generated by `cargo test`.
+            let test_filter = match tests {
+                FilterRule::All => Target::tested,
+                FilterRule::Just(_) => Target::is_test
+            };
             targets.append(&mut propose_indicated_targets(
-                pkg, tests, "test", Target::is_test, test)?);
+                pkg, tests, "test", test_filter, test_profile)?);
+            // If --benches was specified, add all targets that would be
+            // generated by `cargo bench`.
+            let bench_filter = match benches {
+                FilterRule::All => Target::benched,
+                FilterRule::Just(_) => Target::is_bench
+            };
             targets.append(&mut propose_indicated_targets(
-                pkg, benches, "bench", Target::is_bench, &profiles.bench)?);
+                pkg, benches, "bench", bench_filter, bench_profile)?);
             targets
         }
     };
@@ -680,7 +708,7 @@ fn scrape_build_config(config: &Config,
             if v.val <= 0 {
                 bail!("build.jobs must be positive, but found {} in {}",
                       v.val, v.definition)
-            } else if v.val >= u32::max_value() as i64 {
+            } else if v.val >= i64::from(u32::max_value()) {
                 bail!("build.jobs is too large: found {} in {}", v.val,
                       v.definition)
             } else {
@@ -700,7 +728,7 @@ fn scrape_build_config(config: &Config,
     };
     base.host = scrape_target_config(config, &base.host_triple)?;
     base.target = match target.as_ref() {
-        Some(triple) => scrape_target_config(config, &triple)?,
+        Some(triple) => scrape_target_config(config, triple)?,
         None => base.host.clone(),
     };
     Ok(base)
@@ -746,32 +774,32 @@ fn scrape_target_config(config: &Config, triple: &str)
             let key = format!("{}.{}", key, k);
             match &k[..] {
                 "rustc-flags" => {
-                    let (flags, definition) = value.string(&k)?;
+                    let (flags, definition) = value.string(k)?;
                     let whence = format!("in `{}` (in {})", key,
                                          definition.display());
                     let (paths, links) =
-                        BuildOutput::parse_rustc_flags(&flags, &whence)
+                        BuildOutput::parse_rustc_flags(flags, &whence)
                             ?;
                     output.library_paths.extend(paths);
                     output.library_links.extend(links);
                 }
                 "rustc-link-lib" => {
-                    let list = value.list(&k)?;
+                    let list = value.list(k)?;
                     output.library_links.extend(list.iter()
                         .map(|v| v.0.clone()));
                 }
                 "rustc-link-search" => {
-                    let list = value.list(&k)?;
+                    let list = value.list(k)?;
                     output.library_paths.extend(list.iter().map(|v| {
                         PathBuf::from(&v.0)
                     }));
                 }
                 "rustc-cfg" => {
-                    let list = value.list(&k)?;
+                    let list = value.list(k)?;
                     output.cfgs.extend(list.iter().map(|v| v.0.clone()));
                 }
                 "rustc-env" => {
-                    for (name, val) in value.table(&k)?.0 {
+                    for (name, val) in value.table(k)?.0 {
                         let val = val.string(name)?.0;
                         output.env.push((name.clone(), val.to_string()));
                     }
@@ -782,7 +810,7 @@ fn scrape_target_config(config: &Config, triple: &str)
                     bail!("`{}` is not supported in build script overrides", k);
                 }
                 _ => {
-                    let val = value.string(&k)?.0;
+                    let val = value.string(k)?.0;
                     output.metadata.push((k.clone(), val.to_string()));
                 }
             }

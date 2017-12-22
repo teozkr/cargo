@@ -1,4 +1,4 @@
-use std::cell::{RefCell, RefMut, Cell, Ref};
+use std::cell::{RefCell, RefMut};
 use std::collections::HashSet;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::hash_map::HashMap;
@@ -20,6 +20,8 @@ use toml;
 use core::shell::Verbosity;
 use core::{Shell, CliUnstable};
 use ops;
+use url::Url;
+use util::ToUrl;
 use util::Rustc;
 use util::errors::{CargoResult, CargoResultExt, CargoError, internal};
 use util::paths;
@@ -28,20 +30,37 @@ use util::{Filesystem, LazyCell};
 
 use self::ConfigValue as CV;
 
+/// Configuration information for cargo. This is not specific to a build, it is information
+/// relating to cargo itself.
+///
+/// This struct implements `Default`: all fields can be inferred.
 #[derive(Debug)]
 pub struct Config {
+    /// The location of the users's 'home' directory. OS-dependent.
     home_path: Filesystem,
+    /// Information about how to write messages to the shell
     shell: RefCell<Shell>,
+    /// Information on how to invoke the compiler (rustc)
     rustc: LazyCell<Rustc>,
+    /// A collection of configuration options
     values: LazyCell<HashMap<String, ConfigValue>>,
+    /// The current working directory of cargo
     cwd: PathBuf,
+    /// The location of the cargo executable (path to current process)
     cargo_exe: LazyCell<PathBuf>,
+    /// The location of the rustdoc executable
     rustdoc: LazyCell<PathBuf>,
-    extra_verbose: Cell<bool>,
-    frozen: Cell<bool>,
-    locked: Cell<bool>,
+    /// Whether we are printing extra verbose messages
+    extra_verbose: bool,
+    /// `frozen` is set if we shouldn't access the network
+    frozen: bool,
+    /// `locked` is set if we should not update lock files
+    locked: bool,
+    /// A global static IPC control mechanism (used for managing parallel builds)
     jobserver: Option<jobserver::Client>,
-    cli_flags: RefCell<CliUnstable>,
+    /// Cli flags of the form "-Z something"
+    cli_flags: CliUnstable,
+    /// A handle on curl easy mode for http calls
     easy: LazyCell<RefCell<Easy>>,
 }
 
@@ -68,9 +87,9 @@ impl Config {
             values: LazyCell::new(),
             cargo_exe: LazyCell::new(),
             rustdoc: LazyCell::new(),
-            extra_verbose: Cell::new(false),
-            frozen: Cell::new(false),
-            locked: Cell::new(false),
+            extra_verbose: false,
+            frozen: false,
+            locked: false,
             jobserver: unsafe {
                 if GLOBAL_JOBSERVER.is_null() {
                     None
@@ -78,7 +97,7 @@ impl Config {
                     Some((*GLOBAL_JOBSERVER).clone())
                 }
             },
-            cli_flags: RefCell::new(CliUnstable::default()),
+            cli_flags: CliUnstable::default(),
             easy: LazyCell::new(),
         }
     }
@@ -89,48 +108,102 @@ impl Config {
             "couldn't get the current directory of the process"
         })?;
         let homedir = homedir(&cwd).ok_or_else(|| {
-            "Cargo couldn't find your home directory. \
-             This probably means that $HOME was not set."
+            format_err!("Cargo couldn't find your home directory. \
+                         This probably means that $HOME was not set.")
         })?;
         Ok(Config::new(shell, cwd, homedir))
     }
 
+    /// The user's cargo home directory (OS-dependent)
     pub fn home(&self) -> &Filesystem { &self.home_path }
 
+    /// The cargo git directory (`<cargo_home>/git`)
     pub fn git_path(&self) -> Filesystem {
         self.home_path.join("git")
     }
 
+    /// The cargo registry index directory (`<cargo_home>/registry/index`)
     pub fn registry_index_path(&self) -> Filesystem {
         self.home_path.join("registry").join("index")
     }
 
+    /// The cargo registry cache directory (`<cargo_home>/registry/path`)
     pub fn registry_cache_path(&self) -> Filesystem {
         self.home_path.join("registry").join("cache")
     }
 
+    /// The cargo registry source directory (`<cargo_home>/registry/src`)
     pub fn registry_source_path(&self) -> Filesystem {
         self.home_path.join("registry").join("src")
     }
 
+    /// Get a reference to the shell, for e.g. writing error messages
     pub fn shell(&self) -> RefMut<Shell> {
         self.shell.borrow_mut()
     }
 
+    /// Get the path to the `rustdoc` executable
     pub fn rustdoc(&self) -> CargoResult<&Path> {
         self.rustdoc.get_or_try_init(|| self.get_tool("rustdoc")).map(AsRef::as_ref)
     }
 
+    /// Get the path to the `rustc` executable
     pub fn rustc(&self) -> CargoResult<&Rustc> {
         self.rustc.get_or_try_init(|| Rustc::new(self.get_tool("rustc")?,
                                                  self.maybe_get_tool("rustc_wrapper")?))
     }
 
+    /// Get the path to the `cargo` executable
     pub fn cargo_exe(&self) -> CargoResult<&Path> {
-        self.cargo_exe.get_or_try_init(||
-            env::current_exe().and_then(|path| path.canonicalize())
-            .chain_err(|| "couldn't get the path to cargo executable")
-        ).map(AsRef::as_ref)
+        self.cargo_exe.get_or_try_init(|| {
+            fn from_current_exe() -> CargoResult<PathBuf> {
+                // Try fetching the path to `cargo` using env::current_exe().
+                // The method varies per operating system and might fail; in particular,
+                // it depends on /proc being mounted on Linux, and some environments
+                // (like containers or chroots) may not have that available.
+                let exe = env::current_exe()?.canonicalize()?;
+                Ok(exe)
+            }
+
+            fn from_argv() -> CargoResult<PathBuf> {
+                // Grab argv[0] and attempt to resolve it to an absolute path.
+                // If argv[0] has one component, it must have come from a PATH lookup,
+                // so probe PATH in that case.
+                // Otherwise, it has multiple components and is either:
+                // - a relative path (e.g. `./cargo`, `target/debug/cargo`), or
+                // - an absolute path (e.g. `/usr/local/bin/cargo`).
+                // In either case, Path::canonicalize will return the full absolute path
+                // to the target if it exists
+                let argv0 = env::args_os()
+                    .map(PathBuf::from)
+                    .next()
+                    .ok_or(format_err!("no argv[0]"))?;
+                if argv0.components().count() == 1 {
+                    probe_path(argv0)
+                } else {
+                    Ok(argv0.canonicalize()?)
+                }
+            }
+
+            fn probe_path(argv0: PathBuf) -> CargoResult<PathBuf> {
+                let paths = env::var_os("PATH").ok_or(format_err!("no PATH"))?;
+                for path in env::split_paths(&paths) {
+                    let candidate = PathBuf::from(path).join(&argv0);
+                    if candidate.is_file() {
+                        // PATH may have a component like "." in it, so we still need to
+                        // canonicalize.
+                        return Ok(candidate.canonicalize()?)
+                    }
+                }
+
+                bail!("no cargo executable candidate found in PATH")
+            }
+
+            let exe = from_current_exe()
+                .or_else(|_| from_argv())
+                .chain_err(|| "couldn't get the path to cargo executable")?;
+            Ok(exe)
+        }).map(AsRef::as_ref)
     }
 
     pub fn values(&self) -> CargoResult<&HashMap<String, ConfigValue>> {
@@ -139,11 +212,11 @@ impl Config {
 
     pub fn set_values(&self, values: HashMap<String, ConfigValue>) -> CargoResult<()> {
         if self.values.borrow().is_some() {
-            return Err("Config values already found".into());
+            bail!("config values already found")
         }
         match self.values.fill(values) {
             Ok(()) => Ok(()),
-            Err(_) => Err("Could not fill values".into()),
+            Err(_) => bail!("could not fill values"),
         }
     }
 
@@ -368,11 +441,11 @@ impl Config {
 
     pub fn expected<T>(&self, ty: &str, key: &str, val: CV) -> CargoResult<T> {
         val.expected(ty, key).map_err(|e| {
-            format!("invalid configuration for key `{}`\n{}", key, e).into()
+            format_err!("invalid configuration for key `{}`\n{}", key, e)
         })
     }
 
-    pub fn configure(&self,
+    pub fn configure(&mut self,
                      verbose: u32,
                      quiet: Option<bool>,
                      color: &Option<String>,
@@ -386,7 +459,7 @@ impl Config {
         let cfg_verbose = self.get_bool("term.verbose").unwrap_or(None).map(|v| v.val);
         let cfg_color = self.get_string("term.color").unwrap_or(None).map(|v| v.val);
 
-        let color = color.as_ref().or(cfg_color.as_ref());
+        let color = color.as_ref().or_else(|| cfg_color.as_ref());
 
         let verbosity = match (verbose, cfg_verbose, quiet) {
             (Some(true), _, None) |
@@ -414,30 +487,31 @@ impl Config {
 
         self.shell().set_verbosity(verbosity);
         self.shell().set_color_choice(color.map(|s| &s[..]))?;
-        self.extra_verbose.set(extra_verbose);
-        self.frozen.set(frozen);
-        self.locked.set(locked);
-        self.cli_flags.borrow_mut().parse(unstable_flags)?;
+        self.extra_verbose = extra_verbose;
+        self.frozen = frozen;
+        self.locked = locked;
+        self.cli_flags.parse(unstable_flags)?;
 
         Ok(())
     }
 
-    pub fn cli_unstable(&self) -> Ref<CliUnstable> {
-        self.cli_flags.borrow()
+    pub fn cli_unstable(&self) -> &CliUnstable {
+        &self.cli_flags
     }
 
     pub fn extra_verbose(&self) -> bool {
-        self.extra_verbose.get()
+        self.extra_verbose
     }
 
     pub fn network_allowed(&self) -> bool {
-        !self.frozen.get()
+        !self.frozen
     }
 
     pub fn lock_update_allowed(&self) -> bool {
-        !self.frozen.get() && !self.locked.get()
+        !self.frozen && !self.locked
     }
 
+    /// Loads configuration from the filesystem
     pub fn load_values(&self) -> CargoResult<HashMap<String, ConfigValue>> {
         let mut cfg = CV::Table(HashMap::new(), PathBuf::from("."));
 
@@ -449,12 +523,12 @@ impl Config {
                               path.display())
             })?;
             let toml = cargo_toml::parse(&contents,
-                                         &path,
+                                         path,
                                          self).chain_err(|| {
                 format!("could not parse TOML configuration in `{}`",
                         path.display())
             })?;
-            let value = CV::from_toml(&path, toml).chain_err(|| {
+            let value = CV::from_toml(path, toml).chain_err(|| {
                 format!("failed to load TOML configuration from `{}`",
                         path.display())
             })?;
@@ -471,6 +545,15 @@ impl Config {
         }
     }
 
+    /// Gets the index for a registry.
+    pub fn get_registry_index(&self, registry: &str) -> CargoResult<Url> {
+        Ok(match self.get_string(&format!("registries.{}.index", registry))? {
+            Some(index) => index.val.to_url()?,
+            None => bail!("No index found for registry: `{}`", registry),
+        })
+    }
+
+    /// Loads credentials config from the credentials file into the ConfigValue object, if present.
     fn load_credentials(&self, cfg: &mut ConfigValue) -> CargoResult<()> {
         let home_path = self.home_path.clone().into_path_unlocked();
         let credentials = home_path.join("credentials");
@@ -500,12 +583,14 @@ impl Config {
         };
 
         let registry = cfg.entry("registry".into())
-                          .or_insert(CV::Table(HashMap::new(), PathBuf::from(".")));
+                          .or_insert_with(|| CV::Table(HashMap::new(), PathBuf::from(".")));
 
         match (registry, value) {
             (&mut CV::Table(ref mut old, _), CV::Table(ref mut new, _)) => {
+                // Take ownership of `new` by swapping it with an empty hashmap, so we can move
+                // into an iterator.
                 let new = mem::replace(new, HashMap::new());
-                for (key, value) in new.into_iter() {
+                for (key, value) in new {
                     old.insert(key, value);
                 }
             }
@@ -535,7 +620,7 @@ impl Config {
     /// as a path.
     fn get_tool(&self, tool: &str) -> CargoResult<PathBuf> {
         self.maybe_get_tool(tool)
-            .map(|t| t.unwrap_or(PathBuf::from(tool)))
+            .map(|t| t.unwrap_or_else(|| PathBuf::from(tool)))
     }
 
     pub fn jobserver_from_env(&self) -> Option<&jobserver::Client> {
@@ -543,9 +628,15 @@ impl Config {
     }
 
     pub fn http(&self) -> CargoResult<&RefCell<Easy>> {
-        self.easy.get_or_try_init(|| {
+        let http = self.easy.get_or_try_init(|| {
             ops::http_handle(self).map(RefCell::new)
-        })
+        })?;
+        {
+            let mut http = http.borrow_mut();
+            http.reset();
+            ops::configure_http_handle(self, &mut http)?;
+        }
+        Ok(http)
     }
 }
 
@@ -621,8 +712,8 @@ impl ConfigValue {
                 Ok(CV::List(val.into_iter().map(|toml| {
                     match toml {
                         toml::Value::String(val) => Ok((val, path.to_path_buf())),
-                        v => Err(format!("expected string but found {} \
-                                                in list", v.type_str()).into()),
+                        v => bail!("expected string but found {} in list",
+                                   v.type_str()),
                     }
                 }).collect::<CargoResult<_>>()?, path.to_path_buf()))
             }
@@ -665,7 +756,7 @@ impl ConfigValue {
             }
             (&mut CV::Table(ref mut old, _), CV::Table(ref mut new, _)) => {
                 let new = mem::replace(new, HashMap::new());
-                for (key, value) in new.into_iter() {
+                for (key, value) in new {
                     match old.entry(key.clone()) {
                         Occupied(mut entry) => {
                             let path = value.definition_path().to_path_buf();
@@ -750,10 +841,10 @@ impl ConfigValue {
         }
     }
 
-    fn expected<T>(&self, wanted: &str, key: &str) -> CargoResult<T> {
-        Err(format!("expected a {}, but found a {} for `{}` in {}",
-                    wanted, self.desc(), key,
-                    self.definition_path().display()).into())
+    pub fn expected<T>(&self, wanted: &str, key: &str) -> CargoResult<T> {
+        bail!("expected a {}, but found a {} for `{}` in {}",
+              wanted, self.desc(), key,
+              self.definition_path().display())
     }
 }
 
@@ -796,8 +887,8 @@ fn walk_tree<F>(pwd: &Path, mut walk: F) -> CargoResult<()>
     // in our history to be sure we pick up that standard location for
     // information.
     let home = homedir(pwd).ok_or_else(|| {
-        CargoError::from("Cargo couldn't find your home directory. \
-                          This probably means that $HOME was not set.")
+        format_err!("Cargo couldn't find your home directory. \
+                     This probably means that $HOME was not set.")
     })?;
     let config = home.join("config");
     if !stash.contains(&config) && fs::metadata(&config).is_ok() {
@@ -808,23 +899,36 @@ fn walk_tree<F>(pwd: &Path, mut walk: F) -> CargoResult<()>
 }
 
 pub fn save_credentials(cfg: &Config,
-                       token: String) -> CargoResult<()> {
+                        token: String,
+                        registry: Option<String>) -> CargoResult<()> {
     let mut file = {
         cfg.home_path.create_dir()?;
         cfg.home_path.open_rw(Path::new("credentials"), cfg,
-                                   "credentials' config file")?
+                              "credentials' config file")?
+    };
+
+    let (key, value) = {
+        let key = "token".to_string();
+        let value = ConfigValue::String(token, file.path().to_path_buf());
+
+        if let Some(registry) = registry {
+            let mut map = HashMap::new();
+            map.insert(key, value);
+            (registry, CV::Table(map, file.path().to_path_buf()))
+        } else {
+            (key, value)
+        }
     };
 
     let mut contents = String::new();
     file.read_to_string(&mut contents).chain_err(|| {
-        format!("failed to read configuration file `{}`",
-                      file.path().display())
+        format!("failed to read configuration file `{}`", file.path().display())
     })?;
+
     let mut toml = cargo_toml::parse(&contents, file.path(), cfg)?;
     toml.as_table_mut()
         .unwrap()
-        .insert("token".to_string(),
-                ConfigValue::String(token, file.path().to_path_buf()).into_toml());
+        .insert(key, value.into_toml());
 
     let contents = toml.to_string();
     file.seek(SeekFrom::Start(0))?;

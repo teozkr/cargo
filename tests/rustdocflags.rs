@@ -13,8 +13,8 @@ fn parses_env() {
             version = "0.0.1"
             authors = []
         "#)
-        .file("src/lib.rs", "");
-    p.build();
+        .file("src/lib.rs", "")
+        .build();
 
     assert_that(p.cargo("doc").env("RUSTDOCFLAGS", "--cfg=foo").arg("-v"),
                 execs().with_status(0)
@@ -36,8 +36,8 @@ fn parses_config() {
         .file(".cargo/config", r#"
             [build]
             rustdocflags = ["--cfg", "foo"]
-        "#);
-    p.build();
+        "#)
+        .build();
 
     assert_that(p.cargo("doc").arg("-v"),
                 execs().with_status(0)
@@ -55,8 +55,8 @@ fn bad_flags() {
             version = "0.0.1"
             authors = []
         "#)
-        .file("src/lib.rs", "");
-    p.build();
+        .file("src/lib.rs", "")
+        .build();
 
     assert_that(p.cargo("doc").env("RUSTDOCFLAGS", "--bogus"),
                 execs().with_status(101));
@@ -71,8 +71,8 @@ fn rerun() {
             version = "0.0.1"
             authors = []
         "#)
-        .file("src/lib.rs", "");
-    p.build();
+        .file("src/lib.rs", "")
+        .build();
 
     assert_that(p.cargo("doc").env("RUSTDOCFLAGS", "--cfg=foo"),
                 execs().with_status(0));
@@ -85,4 +85,38 @@ fn rerun() {
 [DOCUMENTING] foo v0.0.1 ([..])
 [FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
 "));
+}
+
+#[test]
+fn rustdocflags_passed_to_rustdoc_through_cargo_test() {
+    let p = project("foo")
+        .file("Cargo.toml", r#"
+            [package]
+            name = "foo"
+            version = "0.0.1"
+        "#)
+        .file("src/lib.rs", r#"
+            //! ```
+            //! assert!(cfg!(do_not_choke));
+            //! ```
+        "#)
+        .build();
+
+    assert_that(p.cargo("test").arg("--doc").env("RUSTDOCFLAGS", "--cfg do_not_choke"),
+                execs().with_status(0));
+}
+
+#[test]
+fn rustdocflags_passed_to_rustdoc_through_cargo_test_only_once() {
+    let p = project("foo")
+        .file("Cargo.toml", r#"
+            [package]
+            name = "foo"
+            version = "0.0.1"
+        "#)
+        .file("src/lib.rs", "")
+        .build();
+
+    assert_that(p.cargo("test").arg("--doc").env("RUSTDOCFLAGS", "--markdown-no-toc"),
+                execs().with_status(0));
 }

@@ -1,10 +1,21 @@
 extern crate cargotest;
 extern crate hamcrest;
+extern crate glob;
 
 use cargotest::is_nightly;
 use cargotest::support::{execs, project};
 use cargotest::support::registry::Package;
-use hamcrest::assert_that;
+use hamcrest::prelude::*;
+use cargotest::support::paths::CargoPathExt;
+use cargotest::install::exe;
+use glob::glob;
+
+const SIMPLE_MANIFEST: &str = r#"
+[package]
+name = "foo"
+version = "0.0.1"
+authors = []
+"#;
 
 #[test]
 fn check_success() {
@@ -23,8 +34,9 @@ fn check_success() {
             fn main() {
                 ::bar::baz();
             }
-        "#);
-    let bar = project("bar")
+        "#)
+        .build();
+    let _bar = project("bar")
         .file("Cargo.toml", r#"
             [package]
             name = "bar"
@@ -33,10 +45,10 @@ fn check_success() {
         "#)
         .file("src/lib.rs", r#"
             pub fn baz() {}
-        "#);
-    bar.build();
+        "#)
+        .build();
 
-    assert_that(foo.cargo_process("check"),
+    assert_that(foo.cargo("check"),
                 execs().with_status(0));
 }
 
@@ -57,8 +69,9 @@ fn check_fail() {
             fn main() {
                 ::bar::baz(42);
             }
-        "#);
-    let bar = project("bar")
+        "#)
+        .build();
+    let _bar = project("bar")
         .file("Cargo.toml", r#"
             [package]
             name = "bar"
@@ -67,10 +80,10 @@ fn check_fail() {
         "#)
         .file("src/lib.rs", r#"
             pub fn baz() {}
-        "#);
-    bar.build();
+        "#)
+        .build();
 
-    assert_that(foo.cargo_process("check"),
+    assert_that(foo.cargo("check"),
                 execs().with_status(101));
 }
 
@@ -106,8 +119,9 @@ fn main() {
     let a = A;
     a.b();
 }
-"#);
-    let bar = project("bar")
+"#)
+        .build();
+    let _bar = project("bar")
         .file("Cargo.toml", r#"
             [package]
             name = "bar"
@@ -128,10 +142,10 @@ use proc_macro::TokenStream;
 pub fn derive(_input: TokenStream) -> TokenStream {
     format!("impl B for A {{ fn b(&self) {{}} }}").parse().unwrap()
 }
-"#);
-    bar.build();
+"#)
+        .build();
 
-    assert_that(foo.cargo_process("check"),
+    assert_that(foo.cargo("check"),
                 execs().with_status(0));
 }
 
@@ -152,10 +166,10 @@ fn check_build() {
             fn main() {
                 ::bar::baz();
             }
-        "#);
-    foo.build();
+        "#)
+        .build();
 
-    let bar = project("bar")
+    let _bar = project("bar")
         .file("Cargo.toml", r#"
             [package]
             name = "bar"
@@ -164,8 +178,8 @@ fn check_build() {
         "#)
         .file("src/lib.rs", r#"
             pub fn baz() {}
-        "#);
-    bar.build();
+        "#)
+        .build();
 
     assert_that(foo.cargo("check"),
                 execs().with_status(0));
@@ -190,10 +204,10 @@ fn build_check() {
             fn main() {
                 ::bar::baz();
             }
-        "#);
-    foo.build();
+        "#)
+        .build();
 
-    let bar = project("bar")
+    let _bar = project("bar")
         .file("Cargo.toml", r#"
             [package]
             name = "bar"
@@ -202,8 +216,8 @@ fn build_check() {
         "#)
         .file("src/lib.rs", r#"
             pub fn baz() {}
-        "#);
-    bar.build();
+        "#)
+        .build();
 
     assert_that(foo.cargo("build"),
                 execs().with_status(0));
@@ -225,9 +239,10 @@ fn issue_3418() {
             [dependencies]
         "#)
         .file("src/lib.rs", "")
-        .file("src/main.rs", "fn main() {}");
+        .file("src/main.rs", "fn main() {}")
+        .build();
 
-    assert_that(foo.cargo_process("check").arg("-v"),
+    assert_that(foo.cargo("check").arg("-v"),
                 execs().with_status(0)
                        .with_stderr_contains("[..] --emit=dep-info,metadata [..]"));
 }
@@ -236,7 +251,7 @@ fn issue_3418() {
 // checked, but in this case with a proc macro too.
 #[test]
 fn issue_3419() {
-    let foo = project("foo")
+    let p = project("foo")
         .file("Cargo.toml", r#"
             [package]
             name = "foo"
@@ -264,7 +279,8 @@ fn issue_3419() {
             fn main() {
                 foo::take::<Foo>();
             }
-        "#);
+        "#)
+        .build();
 
     Package::new("rustc-serialize", "1.0.0")
         .file("src/lib.rs",
@@ -278,8 +294,43 @@ fn issue_3419() {
                     where F: FnOnce(&mut Self) -> Result<T, Self::Error>;
                  } "#).publish();
 
-    assert_that(foo.cargo_process("check"),
+    assert_that(p.cargo("check"),
                 execs().with_status(0));
+}
+
+// Check on a dylib should have a different metadata hash than build.
+#[test]
+fn dylib_check_preserves_build_cache() {
+    let p = project("foo")
+        .file("Cargo.toml", r#"
+            [package]
+            name = "foo"
+            version = "0.1.0"
+            authors = []
+
+            [lib]
+            crate-type = ["dylib"]
+
+            [dependencies]
+        "#)
+        .file("src/lib.rs", "")
+        .build();
+
+    assert_that(p.cargo("build"),
+                execs().with_status(0)
+                .with_stderr("\
+[..]Compiling foo v0.1.0 ([..])
+[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
+"));
+
+    assert_that(p.cargo("check"),
+                execs().with_status(0));
+
+    assert_that(p.cargo("build"),
+                execs().with_status(0)
+                .with_stderr("\
+[FINISHED] dev [unoptimized + debuginfo] target(s) in [..]
+"));
 }
 
 // test `cargo rustc --profile check`
@@ -300,8 +351,9 @@ fn rustc_check() {
             fn main() {
                 ::bar::baz();
             }
-        "#);
-    let bar = project("bar")
+        "#)
+        .build();
+    let _bar = project("bar")
         .file("Cargo.toml", r#"
             [package]
             name = "bar"
@@ -310,10 +362,10 @@ fn rustc_check() {
         "#)
         .file("src/lib.rs", r#"
             pub fn baz() {}
-        "#);
-    bar.build();
+        "#)
+        .build();
 
-    assert_that(foo.cargo_process("rustc")
+    assert_that(foo.cargo("rustc")
                    .arg("--profile")
                    .arg("check")
                    .arg("--")
@@ -338,8 +390,9 @@ fn rustc_check_err() {
             fn main() {
                 ::bar::qux();
             }
-        "#);
-    let bar = project("bar")
+        "#)
+        .build();
+    let _bar = project("bar")
         .file("Cargo.toml", r#"
             [package]
             name = "bar"
@@ -348,10 +401,10 @@ fn rustc_check_err() {
         "#)
         .file("src/lib.rs", r#"
             pub fn baz() {}
-        "#);
-    bar.build();
+        "#)
+        .build();
 
-    assert_that(foo.cargo_process("rustc")
+    assert_that(foo.cargo("rustc")
                    .arg("--profile")
                    .arg("check")
                    .arg("--")
@@ -361,7 +414,7 @@ fn rustc_check_err() {
 
 #[test]
 fn check_all() {
-    let foo = project("foo")
+    let p = project("foo")
         .file("Cargo.toml", r#"
             [package]
             name = "foo"
@@ -383,9 +436,10 @@ fn check_all() {
             authors = []
         "#)
         .file("b/src/main.rs", "fn main() {}")
-        .file("b/src/lib.rs", "");
+        .file("b/src/lib.rs", "")
+        .build();
 
-    assert_that(foo.cargo_process("check").arg("--all").arg("-v"),
+    assert_that(p.cargo("check").arg("--all").arg("-v"),
                 execs().with_status(0)
         .with_stderr_contains("[..] --crate-name foo src[/]lib.rs [..]")
         .with_stderr_contains("[..] --crate-name foo src[/]main.rs [..]")
@@ -416,9 +470,10 @@ fn check_virtual_all_implied() {
         "#)
         .file("bar/src/lib.rs", r#"
             pub fn bar() {}
-        "#);
+        "#)
+        .build();
 
-    assert_that(p.cargo_process("check").arg("-v"),
+    assert_that(p.cargo("check").arg("-v"),
                 execs().with_status(0)
         .with_stderr_contains("[..] --crate-name foo foo[/]src[/]lib.rs [..]")
         .with_stderr_contains("[..] --crate-name bar bar[/]src[/]lib.rs [..]")
@@ -428,20 +483,15 @@ fn check_virtual_all_implied() {
 #[test]
 fn check_all_targets() {
     let foo = project("foo")
-        .file("Cargo.toml", r#"
-            [package]
-            name = "foo"
-            version = "0.0.1"
-            authors = []
-        "#)
+        .file("Cargo.toml", SIMPLE_MANIFEST)
         .file("src/main.rs", "fn main() {}")
         .file("src/lib.rs", "pub fn smth() {}")
         .file("examples/example1.rs", "fn main() {}")
         .file("tests/test2.rs", "#[test] fn t() {}")
         .file("benches/bench3.rs", "")
-    ;
+        .build();
 
-    assert_that(foo.cargo_process("check").arg("--all-targets").arg("-v"),
+    assert_that(foo.cargo("check").arg("--all-targets").arg("-v"),
                 execs().with_status(0)
         .with_stderr_contains("[..] --crate-name foo src[/]lib.rs [..]")
         .with_stderr_contains("[..] --crate-name foo src[/]main.rs [..]")
@@ -449,4 +499,197 @@ fn check_all_targets() {
         .with_stderr_contains("[..] --crate-name test2 tests[/]test2.rs [..]")
         .with_stderr_contains("[..] --crate-name bench3 benches[/]bench3.rs [..]")
         );
+}
+
+#[test]
+fn check_unit_test_profile() {
+    let foo = project("foo")
+        .file("Cargo.toml", SIMPLE_MANIFEST)
+        .file("src/lib.rs", r#"
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn it_works() {
+                    badtext
+                }
+            }
+        "#)
+        .build();
+
+    assert_that(foo.cargo("check"),
+                execs().with_status(0));
+    assert_that(foo.cargo("check").arg("--profile").arg("test"),
+                execs().with_status(101)
+                .with_stderr_contains("[..]badtext[..]"));
+}
+
+// Verify what is checked with various command-line filters.
+#[test]
+fn check_filters() {
+    let p = project("foo")
+        .file("Cargo.toml", SIMPLE_MANIFEST)
+        .file("src/lib.rs", r#"
+            fn unused_normal_lib() {}
+            #[cfg(test)]
+            mod tests {
+                fn unused_unit_lib() {}
+            }
+        "#)
+        .file("src/main.rs", r#"
+            fn main() {}
+            fn unused_normal_bin() {}
+            #[cfg(test)]
+            mod tests {
+                fn unused_unit_bin() {}
+            }
+        "#)
+        .file("tests/t1.rs", r#"
+            fn unused_normal_t1() {}
+            #[cfg(test)]
+            mod tests {
+                fn unused_unit_t1() {}
+            }
+        "#)
+        .file("examples/ex1.rs", r#"
+            fn main() {}
+            fn unused_normal_ex1() {}
+            #[cfg(test)]
+            mod tests {
+                fn unused_unit_ex1() {}
+            }
+        "#)
+        .file("benches/b1.rs", r#"
+            fn unused_normal_b1() {}
+            #[cfg(test)]
+            mod tests {
+                fn unused_unit_b1() {}
+            }
+        "#)
+        .build();
+
+    assert_that(p.cargo("check"),
+        execs().with_status(0)
+        .with_stderr_contains("[..]unused_normal_lib[..]")
+        .with_stderr_contains("[..]unused_normal_bin[..]")
+        .with_stderr_does_not_contain("unused_normal_t1")
+        .with_stderr_does_not_contain("unused_normal_ex1")
+        .with_stderr_does_not_contain("unused_normal_b1")
+        .with_stderr_does_not_contain("unused_unit_"));
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--tests").arg("-v"),
+        execs().with_status(0)
+        .with_stderr_contains("[..] --crate-name foo src[/]lib.rs [..] --test [..]")
+        .with_stderr_contains("[..] --crate-name foo src[/]lib.rs --crate-type lib [..]")
+        .with_stderr_contains("[..] --crate-name foo src[/]main.rs [..] --test [..]")
+        .with_stderr_contains("[..] --crate-name foo src[/]main.rs --crate-type bin [..]")
+        .with_stderr_contains("[..]unused_unit_lib[..]")
+        .with_stderr_contains("[..]unused_unit_bin[..]")
+        .with_stderr_contains("[..]unused_normal_lib[..]")
+        .with_stderr_contains("[..]unused_normal_bin[..]")
+        .with_stderr_contains("[..]unused_unit_t1[..]")
+        .with_stderr_contains("[..]unused_normal_ex1[..]")
+        .with_stderr_contains("[..]unused_unit_ex1[..]")
+        .with_stderr_does_not_contain("unused_normal_b1")
+        .with_stderr_does_not_contain("unused_unit_b1"));
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--test").arg("t1").arg("-v"),
+        execs().with_status(0)
+        .with_stderr_contains("[..]unused_normal_lib[..]")
+        .with_stderr_contains("[..]unused_normal_bin[..]")
+        .with_stderr_contains("[..]unused_unit_t1[..]")
+        .with_stderr_does_not_contain("unused_unit_lib")
+        .with_stderr_does_not_contain("unused_unit_bin")
+        .with_stderr_does_not_contain("unused_normal_ex1")
+        .with_stderr_does_not_contain("unused_normal_b1")
+        .with_stderr_does_not_contain("unused_unit_ex1")
+        .with_stderr_does_not_contain("unused_unit_b1"));
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--all-targets").arg("-v"),
+        execs().with_status(0)
+        .with_stderr_contains("[..]unused_normal_lib[..]")
+        .with_stderr_contains("[..]unused_normal_bin[..]")
+        .with_stderr_contains("[..]unused_normal_t1[..]")
+        .with_stderr_contains("[..]unused_normal_ex1[..]")
+        .with_stderr_contains("[..]unused_normal_b1[..]")
+        .with_stderr_contains("[..]unused_unit_b1[..]")
+        .with_stderr_contains("[..]unused_unit_t1[..]")
+        .with_stderr_contains("[..]unused_unit_lib[..]")
+        .with_stderr_contains("[..]unused_unit_bin[..]")
+        .with_stderr_contains("[..]unused_unit_ex1[..]"));
+}
+
+#[test]
+fn check_artifacts()
+{
+    // Verify which artifacts are created when running check (#4059).
+    let p = project("foo")
+        .file("Cargo.toml", SIMPLE_MANIFEST)
+        .file("src/lib.rs", "")
+        .file("src/main.rs", "fn main() {}")
+        .file("tests/t1.rs", "")
+        .file("examples/ex1.rs", "fn main() {}")
+        .file("benches/b1.rs", "")
+        .build();
+    assert_that(p.cargo("check"), execs().with_status(0));
+    assert_that(&p.root().join("target/debug/libfoo.rmeta"),
+        existing_file());
+    assert_that(&p.root().join("target/debug/libfoo.rlib"),
+        is_not(existing_file()));
+    assert_that(&p.root().join("target/debug").join(exe("foo")),
+        is_not(existing_file()));
+
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--lib"), execs().with_status(0));
+    assert_that(&p.root().join("target/debug/libfoo.rmeta"),
+        existing_file());
+    assert_that(&p.root().join("target/debug/libfoo.rlib"),
+        is_not(existing_file()));
+    assert_that(&p.root().join("target/debug").join(exe("foo")),
+        is_not(existing_file()));
+
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--bin").arg("foo"),
+        execs().with_status(0));
+    assert_that(&p.root().join("target/debug/libfoo.rmeta"),
+        existing_file());
+    assert_that(&p.root().join("target/debug/libfoo.rlib"),
+        is_not(existing_file()));
+    assert_that(&p.root().join("target/debug").join(exe("foo")),
+        is_not(existing_file()));
+
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--test").arg("t1"),
+        execs().with_status(0));
+    assert_that(&p.root().join("target/debug/libfoo.rmeta"),
+        existing_file());
+    assert_that(&p.root().join("target/debug/libfoo.rlib"),
+        is_not(existing_file()));
+    assert_that(&p.root().join("target/debug").join(exe("foo")),
+        is_not(existing_file()));
+    assert_that(glob(&p.root().join("target/debug/t1-*").to_str().unwrap())
+            .unwrap().count(),
+        is(equal_to(0)));
+
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--example").arg("ex1"),
+        execs().with_status(0));
+    assert_that(&p.root().join("target/debug/libfoo.rmeta"),
+        existing_file());
+    assert_that(&p.root().join("target/debug/libfoo.rlib"),
+        is_not(existing_file()));
+    assert_that(&p.root().join("target/debug/examples").join(exe("ex1")),
+        is_not(existing_file()));
+
+    p.root().join("target").rm_rf();
+    assert_that(p.cargo("check").arg("--bench").arg("b1"),
+        execs().with_status(0));
+    assert_that(&p.root().join("target/debug/libfoo.rmeta"),
+        existing_file());
+    assert_that(&p.root().join("target/debug/libfoo.rlib"),
+        is_not(existing_file()));
+    assert_that(&p.root().join("target/debug").join(exe("foo")),
+        is_not(existing_file()));
+    assert_that(glob(&p.root().join("target/debug/b1-*").to_str().unwrap())
+            .unwrap().count(),
+        is(equal_to(0)));
 }
